@@ -1,0 +1,5 @@
+# Shell + Python tooling MUST stay LF — CRLF breaks bash/python on Linux
+# servers (the installer is piped to `bash` and run directly on Debian).
+*.sh        text eol=lf
+scripts/*.py text eol=lf
+panel/*.py  text eol=lf

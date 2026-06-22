@@ -1,0 +1,80 @@
+name: Release
+
+# Publishes prebuilt Linux server binaries + panel + self-contained
+# install tarballs to GitHub Releases. install.sh consumes these:
+#   - loose binaries  tamizdat-server-app-linux-<arch>  (download fallback)
+#   - panel           tamizdat-panel.py
+#   - bundles         tamizdat-<tag>-linux-<arch>.tar.gz (offline install)
+#
+# Trigger by pushing a tag (v*) or running the workflow manually.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.3.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build artifacts
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.tag }}"
+          mkdir -p dist
+          for ARCH in amd64 arm64; do
+            echo "==> building linux/${ARCH}"
+            CGO_ENABLED=0 GOOS=linux GOARCH="${ARCH}" \
+              go build -trimpath -ldflags='-s -w' \
+              -o "dist/tamizdat-server-app-linux-${ARCH}" ./cmd/tamizdat-server
+            stage="$(mktemp -d)"
+            cp "dist/tamizdat-server-app-linux-${ARCH}" "${stage}/tamizdat-server-app"
+            cp panel/tamizdat-panel.py "${stage}/tamizdat-panel.py"
+            cp scripts/install.sh scripts/uninstall.sh "${stage}/"
+            chmod +x "${stage}/install.sh" "${stage}/uninstall.sh" "${stage}/tamizdat-server-app"
+            tar -C "${stage}" -czf "dist/tamizdat-${TAG}-linux-${ARCH}.tar.gz" .
+            rm -rf "${stage}"
+          done
+          cp panel/tamizdat-panel.py dist/tamizdat-panel.py
+          echo "==> artifacts:"; ls -la dist
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.tag.outputs.tag }}"
+          gh release create "${TAG}" \
+            --title "Tamizdat ${TAG}" \
+            --target "${GITHUB_SHA}" \
+            --notes "Prebuilt Linux server + panel.
+
+          Install (offline): download the linux-amd64 or linux-arm64 tarball, extract, then \`sudo ./install.sh\`.
+          Install (one-line): \`curl -fsSL .../install.sh | sudo bash\` — the script fetches the matching binary from this release." \
+            "dist/tamizdat-server-app-linux-amd64" \
+            "dist/tamizdat-server-app-linux-arm64" \
+            "dist/tamizdat-panel.py" \
+            "dist/tamizdat-${TAG}-linux-amd64.tar.gz" \
+            "dist/tamizdat-${TAG}-linux-arm64.tar.gz"

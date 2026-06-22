@@ -1,0 +1,72 @@
+{
+  "_comment": "Example config for tamizdat-node. Edit placeholders before use.",
+  "log": { "level": "info" },
+  "inbounds": [
+    {
+      "tag": "socks-local",
+      "protocol": "socks",
+      "listen": "127.0.0.1:1080"
+    },
+    {
+      "tag": "http-local",
+      "protocol": "http",
+      "listen": "127.0.0.1:8118"
+    },
+    {
+      "_comment": "Optional: also act as a Tamizdat server. Remove this block to disable.",
+      "tag": "tamizdat-in",
+      "protocol": "tamizdat",
+      "listen": ":8443",
+      "settings": {
+        "private_key_hex": "<SERVER_X25519_PRIVATE_KEY_HEX>",
+        "shortids_hex": ["<USER_SHORT_ID_HEX>"],
+        "cert_pem_path": "/etc/tamizdat/cert.pem",
+        "key_pem_path": "/etc/tamizdat/key.pem",
+        "masquerade_domain": "cover.example.com",
+        "masquerade_pool": {
+          "cover.example.com": "cover.example.com:443"
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "tamizdat-out",
+      "protocol": "tamizdat",
+      "settings": {
+        "server_addr": "server.example.com:443",
+        "server_names": ["cover.example.com"],
+        "public_key_hex": "<SERVER_X25519_PUBLIC_KEY_HEX>",
+        "shortids_hex": ["<USER_SHORT_ID_HEX>"],
+        "fingerprint": "chrome",
+        "min_transports": 2,
+        "bytes_per_transport_soft_cap": 13312,
+        "cover_traffic_enabled": true
+      }
+    },
+    {
+      "tag": "direct",
+      "protocol": "freedom"
+    },
+    {
+      "tag": "block",
+      "protocol": "blackhole"
+    }
+  ],
+  "routing": {
+    "domain_strategy": "IPIfNonMatch",
+    "default_outbound": "tamizdat-out",
+    "rules": [
+      {
+        "_comment": "Private networks stay direct.",
+        "ip": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "169.254.0.0/16", "::1/128", "fe80::/10"],
+        "outbound": "direct"
+      },
+      {
+        "_comment": "Example blocked domains.",
+        "domain": ["domain:ads.example", "keyword:tracker"],
+        "outbound": "block"
+      }
+    ]
+  }
+}

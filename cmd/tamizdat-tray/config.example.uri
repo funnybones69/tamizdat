@@ -1,0 +1,4 @@
+# One tamizdat:// URI per non-empty line.
+# If there is more than one URI, the tray menu shows Servers and lets you switch/reconnect.
+tamizdat://server.example.com:443/?sni=ya.ru&pubkey=0000000000000000000000000000000000000000000000000000000000000001&shortid=0000000000000001&fp=mix&min_transports=4&max_transports=4#PC
+# tamizdat://198.51.100.10:443/?sni=example.org&pubkey=0000000000000000000000000000000000000000000000000000000000000002&shortid=0000000000000002&fp=chrome#Backup

@@ -1,0 +1,41 @@
+# Build artifacts
+/bin/
+/dist/
+/build/
+*.exe
+*.dll
+*.so
+*.dylib
+*.syso
+*.test
+*.out
+*.prof
+
+# Runtime data and secrets
+*.db
+*.sqlite
+*.sqlite3
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.env
+*.log
+*.pcap
+*.pcapng
+*.bak
+*.tmp
+
+# Local generated files
+run.log
+tmp/
+.pytest_cache/
+__pycache__/
+*.pyc
+
+# Local scratch material
+.local/
+
+# Old nested/snapshot trees
+tamizdat/

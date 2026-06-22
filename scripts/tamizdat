@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+# Tamizdat management command installed as /usr/bin/tamizdat.
+set -euo pipefail
+
+APP_DIR=${TAMIZDAT_APP_DIR:-/usr/local/tamizdat}
+BIN_DIR=${TAMIZDAT_BIN_DIR:-${APP_DIR}/bin}
+PANEL_DIR=${TAMIZDAT_PANEL_DIR:-${APP_DIR}/panel}
+SCRIPTS_DIR=${TAMIZDAT_SCRIPTS_DIR:-${APP_DIR}/scripts}
+ETC_DIR=${TAMIZDAT_ETC_DIR:-/etc/tamizdat}
+DB_PATH=${TAMIZDAT_DB_PATH:-${ETC_DIR}/data.db}
+SERVER_SERVICE=${TAMIZDAT_SERVER_SERVICE_NAME:-tamizdat-server-app}
+PANEL_SERVICE=${TAMIZDAT_PANEL_SERVICE_NAME:-tamizdat-panel}
+SERVER_UNIT=${SERVER_SERVICE%.service}.service
+PANEL_UNIT=${PANEL_SERVICE%.service}.service
+INFO_FILE=${ETC_DIR}/install-info.txt
+SERVER_BIN=${BIN_DIR}/tamizdat-server-app
+CLIENT_BIN=${BIN_DIR}/tamizdat-client
+PANEL_BIN=${PANEL_DIR}/tamizdat-panel.py
+UNINSTALL_BIN=${SCRIPTS_DIR}/uninstall.sh
+
+red='\033[0;31m'; green='\033[0;32m'; yellow='\033[0;33m'; plain='\033[0m'
+err() { echo -e "${red}error:${plain} $*" >&2; }
+
+info_value() {
+  local key=$1
+  [[ -r "${INFO_FILE}" ]] || return 1
+  awk -v key="$key" '{
+    for (i=1; i<=NF; i++) {
+      split($i, a, "=")
+      if (a[1] == key) {
+        sub("^[^=]*=", "", $i)
+        print $i
+        exit
+      }
+    }
+  }' "${INFO_FILE}"
+}
+
+setting_value() {
+  local key=$1 fallback=${2:-}
+  if [[ -r "$DB_PATH" ]] && command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 "$DB_PATH" "SELECT value FROM settings WHERE key='${key}' LIMIT 1;" 2>/dev/null || true
+  else
+    printf '%s\n' "$fallback"
+  fi
+}
+
+panel_url() {
+  local bind port base host
+  bind=$(info_value bind || true)
+  port=$(info_value port || true)
+  base=$(info_value base || true)
+  host=$(info_value host || true)
+  bind=${bind:-127.0.0.1}
+  port=${port:-8888}
+  base=${base:-/}
+  case "$base" in /*) ;; *) base="/$base" ;; esac
+  printf 'Panel URL: http://%s:%s%s/\n' "$bind" "$port" "${base%/}"
+  if [[ "$bind" == "127.0.0.1" || "$bind" == "localhost" ]]; then
+    printf 'SSH tunnel: ssh -L %s:127.0.0.1:%s root@%s\n' "$port" "$port" "${host:-server.example.com}"
+  fi
+}
+
+status_cmd() {
+  local panel_port server_port pattern
+  panel_port=$(info_value port || true)
+  server_port=$(setting_value inbound_listen_port 443 || true)
+  echo "Services:"
+  systemctl is-active "$SERVER_UNIT" "$PANEL_UNIT" 2>/dev/null | sed "1s/^/  ${SERVER_UNIT}: /; 2s/^/  ${PANEL_UNIT}: /" || true
+  echo
+  echo "Listening ports:"
+  if command -v ss >/dev/null 2>&1; then
+    pattern='tamizdat|python3'
+    [[ -n "${server_port}" ]] && pattern="${pattern}|[:.]${server_port}[[:space:]]"
+    [[ -n "${panel_port}" ]] && pattern="${pattern}|[:.]${panel_port}[[:space:]]"
+    ss -lntp 2>/dev/null | grep -E "$pattern" || echo '  (no matching listeners shown)'
+  else
+    echo '  ss not installed'
+  fi
+  echo
+  panel_url || true
+}
+
+logs_cmd() {
+  local target=${1:-all}
+  case "$target" in
+    server) journalctl -u "$SERVER_UNIT" -n 120 --no-pager ;;
+    panel)  journalctl -u "$PANEL_UNIT" -n 120 --no-pager ;;
+    all)    journalctl -u "$SERVER_UNIT" -u "$PANEL_UNIT" -n 160 --no-pager ;;
+    *) err "usage: tamizdat logs [server|panel|all]"; exit 2 ;;
+  esac
+}
+
+restart_cmd() {
+  systemctl restart "$SERVER_UNIT" "$PANEL_UNIT"
+  systemctl is-active "$SERVER_UNIT" "$PANEL_UNIT"
+}
+
+start_cmd() { systemctl start "$SERVER_UNIT" "$PANEL_UNIT"; }
+stop_cmd()  { systemctl stop "$PANEL_UNIT" "$SERVER_UNIT"; }
+
+uninstall_cmd() {
+  [[ -x "$UNINSTALL_BIN" ]] || { err "uninstaller not found: $UNINSTALL_BIN"; exit 1; }
+  exec "$UNINSTALL_BIN" "$@"
+}
+
+info_cmd() {
+  echo "Install: ${APP_DIR}"
+  echo "Config:  ${ETC_DIR}"
+  echo "DB:      ${DB_PATH}"
+  echo "Server:  ${SERVER_BIN}"
+  echo "Panel:   ${PANEL_BIN}"
+  if [[ -x "$CLIENT_BIN" ]]; then echo "Client:  ${CLIENT_BIN}"; fi
+  echo "Uninstall: ${UNINSTALL_BIN}"
+  echo
+  panel_url || true
+  echo
+  if [[ -r "$DB_PATH" ]] && command -v sqlite3 >/dev/null 2>&1; then
+    echo "Users:"
+    sqlite3 "$DB_PATH" "SELECT name,outbound_tag FROM users ORDER BY name;" 2>/dev/null | sed 's/^/  /' || true
+  fi
+}
+
+version_cmd() {
+  for f in "$SERVER_BIN" "$CLIENT_BIN" "$PANEL_BIN" "$UNINSTALL_BIN"; do
+    [[ -e "$f" ]] || continue
+    if command -v sha256sum >/dev/null 2>&1; then
+      sha256sum "$f"
+    else
+      echo "$f"
+    fi
+  done
+}
+
+help_cmd() {
+  cat <<'EOF'
+Tamizdat management command
+
+Usage:
+  tamizdat status          Show service status, listeners and panel URL
+  tamizdat info            Show install paths and non-secret DB summary
+  tamizdat panel-url       Print panel URL and SSH tunnel hint
+  tamizdat logs [target]   Show logs: server, panel, or all
+  tamizdat restart         Restart server + panel
+  tamizdat start           Start server + panel
+  tamizdat stop            Stop panel + server
+  tamizdat uninstall [--purge]
+                           Remove app/services; --purge also removes /etc/tamizdat
+  tamizdat version         Print installed file hashes
+  tamizdat help            Show this help
+
+Secrets are not printed. Client profiles remain in /etc/tamizdat or root-only
+operator files created by the panel/API.
+EOF
+}
+
+cmd=${1:-help}; shift || true
+case "$cmd" in
+  status) status_cmd "$@" ;;
+  info) info_cmd "$@" ;;
+  panel-url|uri) panel_url "$@" ;;
+  logs) logs_cmd "$@" ;;
+  restart) restart_cmd "$@" ;;
+  start) start_cmd "$@" ;;
+  stop) stop_cmd "$@" ;;
+  uninstall) uninstall_cmd "$@" ;;
+  version) version_cmd "$@" ;;
+  help|-h|--help) help_cmd ;;
+  *) err "unknown command: $cmd"; help_cmd; exit 2 ;;
+esac
