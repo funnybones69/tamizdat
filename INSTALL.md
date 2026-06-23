@@ -241,8 +241,10 @@ tamizdat panel-url
 Example SSH tunnel when the panel listens on `127.0.0.1:8888`:
 
 ```bash
-ssh -L 8888:127.0.0.1:8888 root@server.example.com
+ssh -L 127.0.0.1:8888:127.0.0.1:8888 root@server.example.com
 ```
+
+Bind the local side explicitly to `127.0.0.1`. On hosts without a working IPv6 loopback, the shorter `ssh -L 8888:127.0.0.1:8888 ...` form can fail while trying to bind `::1`.
 
 Then open the URL printed by `tamizdat panel-url` locally, replacing the host with `127.0.0.1` if needed.
 
@@ -469,17 +471,33 @@ Full router guide: [OPENWRT.md](OPENWRT.md).
 
 ### Linux CLI client
 
-The Linux client is a local SOCKS5 proxy. Install just the client binary on the client machine:
+The Linux client is a local SOCKS5 proxy. If the client machine is only a client, install the client binary from the release tarball:
 
 ```bash
 tar xf tamizdat-linux-amd64.tar.gz
 sudo install -m 0755 tamizdat/tamizdat-client /usr/local/bin/tamizdat-client
 ```
 
-Run it with the profile values from the panel:
+If the machine already runs a Tamizdat server/panel, do **not** blindly run the server installer again just to get a client. Extract the release tarball into a separate directory and use only `tamizdat-client`, for example:
+
+```bash
+mkdir -p /opt/tamizdat-client
+sudo tar -xzf tamizdat-linux-amd64.tar.gz -C /opt/tamizdat-client --strip-components=1 tamizdat/tamizdat-client
+sudo chmod 0755 /opt/tamizdat-client/tamizdat-client
+```
+
+Prefer a panel-generated profile URI file so the short ID and public key are not exposed in process arguments:
+
+```bash
+install -m 0600 panel-profile.uri ./profile.uri
+tamizdat-client -config-file ./profile.uri -listen 127.0.0.1:1080
+```
+
+Equivalent explicit-field H2 form:
 
 ```bash
 tamizdat-client \
+  -transport h2 \
   -server server.example.com:443 \
   -servername cover.example.com \
   -pubkey <server-public-key-hex> \
@@ -487,26 +505,25 @@ tamizdat-client \
   -listen 127.0.0.1:1080
 ```
 
-Then configure applications to use:
+Then configure TCP applications to use remote-DNS SOCKS:
 
 ```text
 socks5h://127.0.0.1:1080
 ```
 
+The same SOCKS listener supports SOCKS5 UDP ASSOCIATE for UDP-capable clients. For example, DNS tools or applications that implement SOCKS5 UDP can send UDP through the relay after opening a UDP ASSOCIATE control connection to `127.0.0.1:1080`.
+
 Optional local SOCKS authentication:
 
 ```bash
 tamizdat-client \
-  -server server.example.com:443 \
-  -servername cover.example.com \
-  -pubkey <server-public-key-hex> \
-  -shortid <user-short-id-hex> \
+  -config-file ./profile.uri \
   -listen 127.0.0.1:1080 \
   -auth-user localuser \
   -auth-pass '<local-socks-password>'
 ```
 
-For a long-running Linux desktop/session, wrap that command in your user service manager, supervisor, or shell autostart. Keep the profile values private.
+For a long-running Linux desktop/session, wrap that command in your user service manager, supervisor, or shell autostart. Keep profile URI files private (`0600`) and prefer loopback-only listeners unless you add local SOCKS authentication.
 
 ### Windows tray client
 

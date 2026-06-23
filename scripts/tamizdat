@@ -57,7 +57,7 @@ panel_url() {
   case "$base" in /*) ;; *) base="/$base" ;; esac
   printf 'Panel URL: http://%s:%s%s/\n' "$bind" "$port" "${base%/}"
   if [[ "$bind" == "127.0.0.1" || "$bind" == "localhost" ]]; then
-    printf 'SSH tunnel: ssh -L %s:127.0.0.1:%s root@%s\n' "$port" "$port" "${host:-server.example.com}"
+    printf 'SSH tunnel: ssh -L 127.0.0.1:%s:127.0.0.1:%s root@%s\n' "$port" "$port" "${host:-server.example.com}"
   fi
 }
 
