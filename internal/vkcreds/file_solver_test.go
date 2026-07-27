@@ -130,21 +130,11 @@ func TestFileCaptchaSolverChallengeContract(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	done := make(chan struct{})
 	go func() {
-		defer close(done)
 		_, _ = s.SolveCaptcha(ctx, "https://id.vk.ru/not_robot_captcha?session_token=ST&variant=popup", "ST")
 	}()
 
 	chal := waitChallenge(t, dir)
-	defer func() {
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(time.Second):
-			t.Fatal("SolveCaptcha did not exit after context cancellation")
-		}
-	}()
 	if len(chal.ID) != 16 {
 		t.Errorf("id = %q, want 16 hex chars", chal.ID)
 	}

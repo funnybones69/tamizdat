@@ -19,5 +19,5 @@ func requireWintunDLL() error {
 			return nil
 		}
 	}
-	return fmt.Errorf("wintun.dll not found next to executable or in working directory; copy the amd64 Wintun DLL beside tamizdat-tun-windows.exe")
+	return fmt.Errorf("wintun.dll not found next to executable or in working directory; copy the amd64 Wintun DLL beside samizdat-tun-windows.exe")
 }

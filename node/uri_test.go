@@ -138,8 +138,8 @@ func TestParseURICpoolErrors(t *testing.T) {
 // pool-config knobs (`pool_variant`, `min_transports`, `max_transports`,
 // `rotation_overlap`, `bytes_per_transport`) carried in the URI's query
 // must round-trip through ParseURI into Profile and out to the resulting
-// TamizdatOutbound's tamizdat.ClientConfig — pre-fix the URI-import branch
-// of NewTamizdatOutbound silently dropped them.
+// SamizdatOutbound's tamizdat.ClientConfig — pre-fix the URI-import branch
+// of NewSamizdatOutbound silently dropped them.
 func TestURIImportPreservesPoolConfig(t *testing.T) {
 	raw := "tamizdat://d1b122782219759f@example.com:443?pbk=" + testPubKeyHex +
 		"&sni=ok.ru" +

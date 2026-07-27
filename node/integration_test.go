@@ -17,7 +17,7 @@ import (
 // freedom-like in-memory outbound at it, and verify a SOCKS5 client can
 // reach the echo target through the routing layer.
 //
-// We can't use FreedomOutbound here because tamizdat.ResolveAndValidateDestination
+// We can't use FreedomOutbound here because samizdat.ResolveAndValidateDestination
 // rejects loopback. So we use a custom direct-dial outbound that skips SSRF
 // checks for the test fixture (and only runs in tests).
 type loopbackDialer struct{ tag string }
@@ -141,7 +141,7 @@ func TestSocksInboundRoutesThroughDispatcher(t *testing.T) {
 	}
 
 	// Echo round-trip.
-	payload := []byte("tamizdat-node ok\n")
+	payload := []byte("samizdat-node ok\n")
 	if _, err := c.Write(payload); err != nil {
 		t.Fatal(err)
 	}

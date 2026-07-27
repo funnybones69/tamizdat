@@ -12,7 +12,7 @@ const (
 
 func TestRegistry_LoadAndLookup(t *testing.T) {
 	db := openTestDB(t)
-	insertUser(t, db, "u-default", "default", testMasterA, "direct", 0, 3)
+	insertUser(t, db, "u-anarki", "anarki", testMasterA, "direct", 0, 3)
 	insertUser(t, db, "u-petrov", "petrov", testMasterB, "direct", 0, 1)
 
 	reg := NewRegistry(50)
@@ -28,10 +28,10 @@ func TestRegistry_LoadAndLookup(t *testing.T) {
 	if !ok {
 		t.Fatalf("master lookup miss")
 	}
-	if lk.UserID != "u-default" || lk.PoolIndex != -1 {
+	if lk.UserID != "u-anarki" || lk.PoolIndex != -1 {
 		t.Fatalf("master lookup got %+v", lk)
 	}
-	if u.Name != "default" {
+	if u.Name != "anarki" {
 		t.Fatalf("user name mismatch %s", u.Name)
 	}
 	if u.PoolSize != 3 {

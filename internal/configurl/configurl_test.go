@@ -2,7 +2,7 @@ package configurl
 
 import "testing"
 
-const testURL = "tamizdat://server.example.com:8443/?sni=cover.example.com&pubkey=1ecb6d89948bda812bcbd56eff43bd63f94d2a2a32c3d52ebfee0010e4634363&shortid=d1b122782219759f&fp=chrome"
+const testURL = "tamizdat://server.example.com:8443/?sni=cover.example.com&pubkey=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f&shortid=0001020304050607&fp=chrome"
 
 func TestParse(t *testing.T) {
 	cfg, err := Parse(testURL)
@@ -18,7 +18,7 @@ func TestParse(t *testing.T) {
 	if len(cfg.PublicKey) != 32 {
 		t.Fatalf("PublicKey len = %d", len(cfg.PublicKey))
 	}
-	if cfg.MasterShortID != [8]byte{0xd1, 0xb1, 0x22, 0x78, 0x22, 0x19, 0x75, 0x9f} {
+	if cfg.MasterShortID != [8]byte{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07} {
 		t.Fatalf("MasterShortID = %x", cfg.MasterShortID)
 	}
 	if cfg.Fingerprint != "chrome" {
@@ -27,7 +27,7 @@ func TestParse(t *testing.T) {
 }
 
 func TestParseDefaultsFingerprint(t *testing.T) {
-	cfg, err := Parse("tamizdat://example.com:443/?sni=cover.example.com&pubkey=1ecb6d89948bda812bcbd56eff43bd63f94d2a2a32c3d52ebfee0010e4634363&shortid=d1b122782219759f")
+	cfg, err := Parse("tamizdat://example.com:443/?sni=cover.example.com&pubkey=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f&shortid=0001020304050607")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestParseDefaultsFingerprint(t *testing.T) {
 }
 
 func TestParseRejectsMissingPort(t *testing.T) {
-	if _, err := Parse("tamizdat://example.com/?sni=cover.example.com&pubkey=1ecb6d89948bda812bcbd56eff43bd63f94d2a2a32c3d52ebfee0010e4634363&shortid=d1b122782219759f"); err == nil {
+	if _, err := Parse("tamizdat://example.com/?sni=cover.example.com&pubkey=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f&shortid=0001020304050607"); err == nil {
 		t.Fatal("Parse succeeded without host:port")
 	}
 }
@@ -45,7 +45,7 @@ func TestParseRejectsMissingPort(t *testing.T) {
 func TestParseCleanURICopiesHostToBootstrap(t *testing.T) {
 	// Server-pushes-pool (2026-05-09): URI without sni= must parse OK and
 	// carry BootstrapSNI = host so the very first transport has a name.
-	cfg, err := Parse("tamizdat://example.com:443/?pubkey=1ecb6d89948bda812bcbd56eff43bd63f94d2a2a32c3d52ebfee0010e4634363&shortid=d1b122782219759f")
+	cfg, err := Parse("tamizdat://example.com:443/?pubkey=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f&shortid=0001020304050607")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestParseCleanURICopiesHostToBootstrap(t *testing.T) {
 }
 
 func TestParseExplicitBootstrap(t *testing.T) {
-	cfg, err := Parse("tamizdat://203.0.113.10:443/?bootstrap=bootstrap.example.com&pubkey=1ecb6d89948bda812bcbd56eff43bd63f94d2a2a32c3d52ebfee0010e4634363&shortid=d1b122782219759f")
+	cfg, err := Parse("tamizdat://192.0.2.1:443/?bootstrap=bootstrap.example.com&pubkey=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f&shortid=0001020304050607")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -74,14 +74,14 @@ func TestParseExplicitBootstrap(t *testing.T) {
 }
 
 func TestParseBareIPWithoutBootstrap(t *testing.T) {
-	cfg, err := Parse("tamizdat://203.0.113.10:443/?pubkey=1ecb6d89948bda812bcbd56eff43bd63f94d2a2a32c3d52ebfee0010e4634363&shortid=d1b122782219759f")
+	cfg, err := Parse("tamizdat://192.0.2.1:443/?pubkey=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f&shortid=0001020304050607")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if cfg.BootstrapSNI != "203.0.113.10" {
+	if cfg.BootstrapSNI != "192.0.2.1" {
 		t.Fatalf("BootstrapSNI = %q, want IP literal", cfg.BootstrapSNI)
 	}
-	if cfg.ServerName != "203.0.113.10" {
+	if cfg.ServerName != "192.0.2.1" {
 		t.Fatalf("ServerName = %q, want IP fallback", cfg.ServerName)
 	}
 }
@@ -104,7 +104,7 @@ func TestParseLegacyURIBackwardCompat(t *testing.T) {
 
 func TestParseExplicitBootstrapOverridesHost(t *testing.T) {
 	// Mixed URI: legacy sni= still present plus new bootstrap= override.
-	cfg, err := Parse("tamizdat://example.com:443/?sni=cover.example.com&bootstrap=bootstrap.example.com&pubkey=1ecb6d89948bda812bcbd56eff43bd63f94d2a2a32c3d52ebfee0010e4634363&shortid=d1b122782219759f")
+	cfg, err := Parse("tamizdat://example.com:443/?sni=cover.example.com&bootstrap=bootstrap.example.com&pubkey=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f&shortid=0001020304050607")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestParseExplicitBootstrapOverridesHost(t *testing.T) {
 }
 
 func TestParseTransportBounds(t *testing.T) {
-	cfg, err := Parse("tamizdat://example.com:443/?sni=cover.example.com&pubkey=1ecb6d89948bda812bcbd56eff43bd63f94d2a2a32c3d52ebfee0010e4634363&shortid=d1b122782219759f&min_transports=4&max_transports=4#PC")
+	cfg, err := Parse("tamizdat://example.com:443/?sni=cover.example.com&pubkey=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f&shortid=0001020304050607&min_transports=4&max_transports=4#PC")
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -127,7 +127,7 @@ func TestParseTransportBounds(t *testing.T) {
 }
 
 func TestParseRejectsInvalidTransportBounds(t *testing.T) {
-	if _, err := Parse("tamizdat://example.com:443/?sni=cover.example.com&pubkey=1ecb6d89948bda812bcbd56eff43bd63f94d2a2a32c3d52ebfee0010e4634363&shortid=d1b122782219759f&min_transports=4&max_transports=2"); err == nil {
+	if _, err := Parse("tamizdat://example.com:443/?sni=cover.example.com&pubkey=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f&shortid=0001020304050607&min_transports=4&max_transports=2"); err == nil {
 		t.Fatal("Parse succeeded with max_transports below min_transports")
 	}
 }

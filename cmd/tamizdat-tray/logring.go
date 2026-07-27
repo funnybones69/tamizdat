@@ -4,14 +4,11 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
 )
-
-type logFileWriter interface {
-	WriteString(string) (int, error)
-}
 
 // logRing is a bounded in-memory log buffer. The log window pulls a full
 // snapshot when it opens and gets per-line notifications afterwards via
@@ -21,7 +18,7 @@ type logRing struct {
 	cap   int
 	lines []string
 	subs  []chan string
-	file  logFileWriter
+	file  *os.File
 }
 
 func newLogRing(capacity int) *logRing {
@@ -31,7 +28,7 @@ func newLogRing(capacity int) *logRing {
 	return &logRing{cap: capacity, lines: make([]string, 0, capacity)}
 }
 
-func (r *logRing) SetFile(f logFileWriter) {
+func (r *logRing) SetFile(f *os.File) {
 	r.mu.Lock()
 	r.file = f
 	r.mu.Unlock()

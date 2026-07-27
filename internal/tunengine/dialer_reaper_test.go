@@ -27,7 +27,7 @@ func reaperTestMetadata() *M.Metadata {
 func TestDialerReapsIdleActiveConn(t *testing.T) {
 	client := &blockingProxyClient{release: make(chan struct{})}
 	close(client.release)
-	dialer := &tamizdatProxyDialer{
+	dialer := &samizdatProxyDialer{
 		client:             client,
 		dialAttemptTimeout: time.Second,
 		activeSlots:        make(chan struct{}, 1),
@@ -87,7 +87,7 @@ func TestDialerReapsIdleActiveConn(t *testing.T) {
 func TestDialerKeepsFreshActiveConn(t *testing.T) {
 	client := &blockingProxyClient{release: make(chan struct{})}
 	close(client.release)
-	dialer := &tamizdatProxyDialer{
+	dialer := &samizdatProxyDialer{
 		client:             client,
 		dialAttemptTimeout: time.Second,
 		activeSlots:        make(chan struct{}, 1),

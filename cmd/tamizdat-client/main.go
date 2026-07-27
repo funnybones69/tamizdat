@@ -1,9 +1,9 @@
-// Command tamizdat-client runs a local SOCKS5 proxy that tunnels connections
-// through a Tamizdat server.
+// Command samizdat-client runs a local SOCKS5 proxy that tunnels connections
+// through a Samizdat server.
 //
 // Supported SOCKS5 surface:
-//   - CMD: CONNECT (0x01) and UDP ASSOCIATE (0x03); BIND (0x02) is rejected
-//     with reply 0x07.
+//   - CMD: only CONNECT (0x01); BIND (0x02) and UDP ASSOCIATE (0x03) are
+//     rejected with reply 0x07.
 //   - ATYP: IPv4 (0x01), domain (0x03, remote DNS / socks5h semantics), and
 //     IPv6 (0x04).
 //   - AUTH: NO AUTH (0x00) by default; optional USER/PASS (0x02) when
@@ -12,8 +12,7 @@
 //
 // Usage:
 //
-//	tamizdat-client -config-file ./profile.uri -listen 127.0.0.1:1080
-//	tamizdat-client -server host:port -servername NAME -pubkey HEX -shortid HEX -listen 127.0.0.1:1080
+//	samizdat-client -server host:port -servername NAME -pubkey HEX -shortid HEX -listen 127.0.0.1:1080
 package main
 
 import (
@@ -27,14 +26,12 @@ import (
 	"io"
 	"log"
 	"net"
-	"net/url"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/funnybones69/tamizdat/internal/configurl"
 	"github.com/funnybones69/tamizdat/internal/transport/fragpoc"
 	"github.com/funnybones69/tamizdat/pkg/tamizdat"
 )
@@ -61,9 +58,7 @@ func (cfg socksConfig) authConfigured() bool {
 
 func main() {
 	var (
-		profileURI        string
-		profileFile       = flag.String("config-file", "", "Path to file containing a tamizdat:// profile URI (recommended; avoids putting secrets in argv)")
-		serverAddr        = flag.String("server", "", "Tamizdat server addr host:port")
+		serverAddr        = flag.String("server", "", "Samizdat server addr host:port")
 		serverName        = flag.String("servername", "", "TLS ServerName (SNI) — cover domain")
 		pubHex            = flag.String("pubkey", "", "Server X25519 public key (hex, 64 chars)")
 		shortIDHex        = flag.String("shortid", "", "Short ID (hex, 16 chars)")
@@ -93,28 +88,7 @@ func main() {
 		authUser          = flag.String("auth-user", "", "SOCKS5 username for RFC 1929 USER/PASS auth (requires --auth-pass)")
 		authPass          = flag.String("auth-pass", "", "SOCKS5 password for RFC 1929 USER/PASS auth (requires --auth-user)")
 	)
-	flag.StringVar(&profileURI, "config", "", "tamizdat:// profile URI (prefer --config-file to avoid exposing secrets in argv)")
-	flag.StringVar(&profileURI, "uri", "", "Alias for --config")
 	flag.Parse()
-
-	if *profileFile != "" {
-		if strings.TrimSpace(profileURI) != "" {
-			log.Fatal("--config/--uri and --config-file are mutually exclusive")
-		}
-		b, err := os.ReadFile(*profileFile)
-		if err != nil {
-			log.Fatalf("read --config-file: %v", err)
-		}
-		profileURI = strings.TrimSpace(string(b))
-	}
-	if strings.TrimSpace(profileURI) != "" {
-		if *serverAddr != "" || *serverName != "" || *pubHex != "" || *shortIDHex != "" {
-			log.Fatal("--config/--uri cannot be combined with --server/--servername/--pubkey/--shortid")
-		}
-		if err := applyProfileURI(profileURI, serverAddr, serverName, pubHex, shortIDHex, fingerprint, transport); err != nil {
-			log.Fatalf("--config: %v", err)
-		}
-	}
 
 	mode := strings.ToLower(strings.TrimSpace(*transport))
 	if mode == "" {
@@ -218,7 +192,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("listen: %v", err)
 	}
-	log.Printf("tamizdat SOCKS5 listening on %s → %s (transport=%s SNI=%s)", *listenAddr, *serverAddr, mode, firstSNI(*serverName))
+	log.Printf("samizdat SOCKS5 listening on %s → %s (transport=%s SNI=%s)", *listenAddr, *serverAddr, mode, firstSNI(*serverName))
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -240,34 +214,6 @@ func main() {
 		}
 		go handleSocks(conn, client, socksCfg)
 	}
-}
-
-func applyProfileURI(raw string, serverAddr, serverName, pubHex, shortIDHex, fingerprint, transport *string) error {
-	raw = strings.TrimSpace(raw)
-	cfg, err := configurl.Parse(raw)
-	if err != nil {
-		return err
-	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		return err
-	}
-	profileTransport := strings.ToLower(strings.TrimSpace(u.Query().Get("transport")))
-	if profileTransport != "" && profileTransport != "h2" {
-		return fmt.Errorf("profile transport %q is not supported by tamizdat-client --config yet; use explicit flags for advanced transports", profileTransport)
-	}
-	if tr := strings.ToLower(strings.TrimSpace(*transport)); tr != "" && tr != "h2" {
-		return fmt.Errorf("--config supports H2 profiles only; got --transport %s", *transport)
-	}
-	*transport = "h2"
-	*serverAddr = cfg.ServerAddr
-	*serverName = strings.Join(cfg.ServerNames, ",")
-	*pubHex = hex.EncodeToString(cfg.PublicKey)
-	*shortIDHex = hex.EncodeToString(cfg.MasterShortID[:])
-	if cfg.Fingerprint != "" {
-		*fingerprint = cfg.Fingerprint
-	}
-	return nil
 }
 
 // Minimal SOCKS5 (TCP CONNECT, optional RFC 1929 USER/PASS auth). Spec RFC 1928.
@@ -329,7 +275,7 @@ func handleSocks(c net.Conn, sc socksDialer, cfg socksConfig) {
 
 	c.SetReadDeadline(time.Time{})
 
-	// Dial via tamizdat
+	// Dial via samizdat
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	tunnel, err := sc.DialContext(ctx, "tcp", dest)

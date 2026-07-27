@@ -5,10 +5,10 @@
 //   - a set of named Inbound listeners (each accepts user/peer traffic and
 //     yields connections with a destination + Request metadata),
 //   - a set of named Outbound dialers (each can establish a connection toward
-//     the destination — direct, blackholed, or via a Tamizdat tunnel, etc.),
+//     the destination — direct, blackholed, or via a Samizdat tunnel, etc.),
 //   - a Dispatcher with ordered routing Rules that map Request → outbound tag.
 //
-// Wire compatibility for the tamizdat inbound/outbound is provided by
+// Wire compatibility for the samizdat inbound/outbound is provided by
 // reusing the existing tamizdat.Server and tamizdat.Client implementations.
 package node
 
@@ -64,7 +64,7 @@ type LogConfig struct {
 //   - "socks":    plain SOCKS5 server (CONNECT only). Settings: SocksSettings.
 //   - "http":     HTTP/1.1 CONNECT proxy. Settings: HTTPSettings.
 //   - "tamizdat": tamizdat-protocol server (TLS+H2 CONNECT, masquerade fallback).
-//     Settings: TamizdatServerSettings.
+//     Settings: SamizdatServerSettings.
 //
 // Tag must be unique within the config and is used in routing rules
 // (rule.inbound_tag) and as the source identifier in dispatcher requests.
@@ -80,7 +80,7 @@ type InboundConfig struct {
 // Protocols (string):
 //   - "freedom":   direct net.Dial via the OS resolver (with SSRF guard).
 //   - "blackhole": drops connections immediately.
-//   - "tamizdat":  dial through a tamizdat tunnel. Settings: TamizdatClientSettings.
+//   - "tamizdat":  dial through a samizdat tunnel. Settings: SamizdatClientSettings.
 //   - "socks":     forward to an upstream SOCKS5 proxy. Settings: SocksOutSettings.
 //
 // Tag must be unique. The first outbound (or the one matched by
@@ -176,9 +176,9 @@ type HTTPSettings struct {
 	Password string `json:"password,omitempty"`
 }
 
-// TamizdatServerSettings configures a "tamizdat" inbound. All fields mirror
+// SamizdatServerSettings configures a "tamizdat" inbound. All fields mirror
 // tamizdat.ServerConfig; see that type for full documentation.
-type TamizdatServerSettings struct {
+type SamizdatServerSettings struct {
 	PrivateKeyHex    string            `json:"private_key_hex"`
 	ShortIDsHex      []string          `json:"shortids_hex"`
 	CertPEMPath      string            `json:"cert_pem_path"`
@@ -200,8 +200,8 @@ type TamizdatServerSettings struct {
 	ServerDBPath string `json:"server_db_path,omitempty"`
 }
 
-// TamizdatClientSettings configures a "tamizdat" outbound.
-type TamizdatClientSettings struct {
+// SamizdatClientSettings configures a "tamizdat" outbound.
+type SamizdatClientSettings struct {
 	URI           string   `json:"uri,omitempty"`
 	ServerAddr    string   `json:"server_addr"`
 	ServerNames   []string `json:"server_names"`
@@ -273,7 +273,7 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("inbounds[%d] %q: unknown protocol %q", i, in.Tag, in.Protocol)
 		}
 		if in.Listen == "" && in.Protocol != "tamizdat" {
-			// tamizdat uses Settings.ListenAddr via its own JSON; others need top-level listen
+			// samizdat uses Settings.ListenAddr via its own JSON; others need top-level listen
 			// (kept loose so future protocols may not require Listen at top level)
 		}
 	}

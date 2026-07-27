@@ -10,10 +10,10 @@ import (
 // evictTestDialer builds a dialer whose active-slot semaphore has the given
 // capacity. The blockingProxyClient has a pre-closed release channel, so dials
 // resolve immediately and the only thing under test is active-slot admission.
-func evictTestDialer(activeCap int) *tamizdatProxyDialer {
+func evictTestDialer(activeCap int) *samizdatProxyDialer {
 	client := &blockingProxyClient{release: make(chan struct{})}
 	close(client.release)
-	return &tamizdatProxyDialer{
+	return &samizdatProxyDialer{
 		client:             client,
 		dialAttemptTimeout: time.Second,
 		activeSlots:        make(chan struct{}, activeCap),
@@ -24,7 +24,7 @@ func evictTestDialer(activeCap int) *tamizdatProxyDialer {
 
 // dialActiveSlotConn runs one DialContext and returns the resulting
 // *activeSlotConn, failing the test on any error.
-func dialActiveSlotConn(t *testing.T, d *tamizdatProxyDialer) *activeSlotConn {
+func dialActiveSlotConn(t *testing.T, d *samizdatProxyDialer) *activeSlotConn {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -39,7 +39,7 @@ func dialActiveSlotConn(t *testing.T, d *tamizdatProxyDialer) *activeSlotConn {
 	return asc
 }
 
-func assertTracked(t *testing.T, d *tamizdatProxyDialer, when string, want map[*activeSlotConn]bool) {
+func assertTracked(t *testing.T, d *samizdatProxyDialer, when string, want map[*activeSlotConn]bool) {
 	t.Helper()
 	d.activeMu.Lock()
 	defer d.activeMu.Unlock()

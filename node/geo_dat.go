@@ -246,35 +246,6 @@ func (db *GeoDB) GeositeMatchers(name string) []domainMatcher {
 	return matchers
 }
 
-// GeositeDomainValues returns concrete domain-like values for a geosite group.
-// It is intended for DNS/nftset based integrations such as the OpenWrt LuCI
-// client. Regex rules are skipped because dnsmasq nftset rules cannot represent
-// arbitrary regular expressions.
-func (db *GeoDB) GeositeDomainValues(name string) []string {
-	rules, ok := geositeRulesFor(db, name)
-	if !ok {
-		return nil
-	}
-	out := make([]string, 0, len(rules))
-	seen := make(map[string]struct{}, len(rules))
-	for _, rule := range rules {
-		typ := strings.ToLower(strings.TrimSpace(rule.Type))
-		if typ == "regex" || typ == "regexp" {
-			continue
-		}
-		value := strings.Trim(strings.ToLower(strings.TrimSpace(rule.Value)), ".")
-		if value == "" {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		out = append(out, value)
-	}
-	return out
-}
-
 func geositeMatchersFor(db *GeoDB, name string) ([]domainMatcher, bool, error) {
 	rules, ok := geositeRulesFor(db, name)
 	if !ok {

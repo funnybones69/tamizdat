@@ -30,7 +30,7 @@ type Session struct {
 		Wait()
 	}
 	handler interface{ Close() }
-	dialer  *tamizdatProxyDialer
+	dialer  *samizdatProxyDialer
 	closed  bool
 }
 
@@ -62,7 +62,7 @@ func (e *Engine) Start(ctx context.Context, opts Options, client ProxyClient) (*
 	if err := e.ensureDevice(opts.Name, opts.MTU); err != nil {
 		return nil, err
 	}
-	dialer := newTamizdatProxyDialer(client, opts.Debug, opts.Dispatcher, opts.DialAttemptTimeout, opts.DialConcurrency, opts.DialActiveConcurrency, opts.DialOpenInterval, opts.DialTargetCooldown, opts.DialTargetCooldownMax, opts.DialMinAttemptBudget, opts.DialRecoveryThreshold, opts.DialRecoveryBackoff, opts.DropPrivateDestinations, opts.DropAllUDP, opts.DropNonDNSUDP, opts.BlockedEndpoints)
+	dialer := newSamizdatProxyDialer(client, opts.Debug, opts.Dispatcher, opts.DialAttemptTimeout, opts.DialConcurrency, opts.DialActiveConcurrency, opts.DialOpenInterval, opts.DialTargetCooldown, opts.DialTargetCooldownMax, opts.DialMinAttemptBudget, opts.DialRecoveryThreshold, opts.DialRecoveryBackoff, opts.DropPrivateDestinations, opts.DropAllUDP, opts.DropNonDNSUDP, opts.BlockedEndpoints)
 	handler := tunnel.New(dialer, statistic.DefaultManager)
 	handler.ProcessAsync()
 

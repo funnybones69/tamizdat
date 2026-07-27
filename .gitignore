@@ -37,5 +37,6 @@ __pycache__/
 # Local scratch material
 .local/
 
-# Old nested/snapshot trees
-tamizdat/
+# Old root-level nested/snapshot tree. Keep pkg/tamizdat: it is the public
+# library package used by the current command binaries.
+/tamizdat/

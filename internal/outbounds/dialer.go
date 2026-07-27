@@ -135,10 +135,10 @@ func (d *TamizdatDialer) DialContext(ctx context.Context, network, target string
 }
 
 // DialPacket routes UDP through the tamizdat outbound's tunnel via
-// the client's DialUDP path (Tamizdat-Protocol: udp/1). Without this,
+// the client's DialUDP path (Samizdat-Protocol: udp/1). Without this,
 // the server's handleUDPCONNECT path skipped routing entirely and
 // dialed UDP from the local IP — breaking iPhone QUIC traffic that
-// was supposed to exit via a remote outbound (e.g. default → mirror).
+// was supposed to exit via a remote outbound (e.g. anarki → mirror).
 func (d *TamizdatDialer) DialPacket(ctx context.Context, target string) (net.PacketConn, error) {
 	client, err := d.ensureClient()
 	if err != nil {
@@ -183,9 +183,9 @@ func (d *TamizdatDialer) Close() error {
 	return nil
 }
 
-// RTTProbeSnapshot adapts the public tamizdat.Client RTT probe to the internal
-// outbounds package without adding a direct dependency on pkg/tamizdat from this
-// package boundary. If the lazy client has not been created yet, or the concrete
+// RTTProbeSnapshot adapts the root tamizdat.Client RTT probe to the internal
+// outbounds package without importing the root package (which would create an
+// import cycle). If the lazy client has not been created yet, or the concrete
 // client does not expose RTTProbeSnapshot, the snapshot is reported absent.
 func (d *TamizdatDialer) RTTProbeSnapshot() RTTSnapshot {
 	if d == nil {

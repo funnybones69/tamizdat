@@ -118,7 +118,7 @@ func TestUserTunForwardsRoutedTCPToOutboundBridge(t *testing.T) {
 	}
 	defer tunDev.Close()
 
-	b := NewOutboundBridge(tunDev, staticResolver{dialer: d}, "fallback-test", nil, nil, nil)
+	b := NewOutboundBridge(tunDev, staticResolver{dialer: d}, "sync2-test", nil, nil, nil)
 	defer b.Close()
 
 	clientIP := netip.MustParseAddr("10.66.66.2")
@@ -286,7 +286,7 @@ func TestUserTunForwardsRoutedUDPToOutboundBridge(t *testing.T) {
 	}
 	defer tunDev.Close()
 
-	b := NewOutboundBridge(tunDev, staticResolver{dialer: d}, "fallback-test", nil, nil, nil)
+	b := NewOutboundBridge(tunDev, staticResolver{dialer: d}, "sync2-test", nil, nil, nil)
 	defer b.Close()
 
 	pkt := testIPv4UDPPacket(t,

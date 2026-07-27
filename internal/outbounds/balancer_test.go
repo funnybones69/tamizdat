@@ -39,25 +39,42 @@ type recordingBalancerDialer struct {
 	rec      *balancerCallRecorder
 	failTCP  atomic.Bool
 	failUDP  atomic.Bool
+	waitTCP  atomic.Bool
+	waitUDP  atomic.Bool
 	rttMs    atomic.Int64
 	closeCnt atomic.Int32
 }
 
+type pairedTestConn struct {
+	net.Conn
+	peer net.Conn
+}
+
+func (c *pairedTestConn) Close() error {
+	err := c.Conn.Close()
+	_ = c.peer.Close()
+	return err
+}
+
 func (d *recordingBalancerDialer) DialContext(ctx context.Context, network, target string) (net.Conn, error) {
 	d.rec.add(d.tag)
+	if d.waitTCP.Load() {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if d.failTCP.Load() {
 		return nil, errors.New("dial " + d.tag + " failed")
 	}
 	a, b := net.Pipe()
-	go func() {
-		<-ctx.Done()
-		_ = b.Close()
-	}()
-	return a, nil
+	return &pairedTestConn{Conn: a, peer: b}, nil
 }
 
 func (d *recordingBalancerDialer) DialPacket(ctx context.Context, target string) (net.PacketConn, error) {
 	d.rec.add(d.tag + ":udp")
+	if d.waitUDP.Load() {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if d.failUDP.Load() {
 		return nil, errors.New("udp " + d.tag + " failed")
 	}
@@ -226,6 +243,52 @@ func TestBalancerRoundRobinFallsForwardWhenSelectedMemberFails(t *testing.T) {
 	}
 }
 
+func TestBalancerFallsForwardWhenFirstMemberStalls(t *testing.T) {
+	rec := &balancerCallRecorder{}
+	primary := &recordingBalancerDialer{tag: "primary", rec: rec}
+	backup := &recordingBalancerDialer{tag: "backup", rec: rec}
+	primary.waitTCP.Store(true)
+	b := newTestBalancer(t, "alive", "alive", primary, backup)
+	b.attemptTimeout = 20 * time.Millisecond
+
+	parent, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	started := time.Now()
+	conn, err := b.DialContext(parent, "tcp", "target.example:443")
+	if err != nil {
+		t.Fatalf("DialContext after stalled primary: %v", err)
+	}
+	_ = conn.Close()
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("fallback took %v, want bounded member timeout", elapsed)
+	}
+
+	want := []string{"primary", "backup"}
+	if got := rec.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("stalled-primary fallback calls = %v, want %v", got, want)
+	}
+}
+
+func TestBalancerParentCancellationDoesNotTryAnotherMember(t *testing.T) {
+	rec := &balancerCallRecorder{}
+	primary := &recordingBalancerDialer{tag: "primary", rec: rec}
+	backup := &recordingBalancerDialer{tag: "backup", rec: rec}
+	primary.waitTCP.Store(true)
+	b := newTestBalancer(t, "alive", "alive", primary, backup)
+	b.attemptTimeout = time.Second
+
+	parent, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := b.DialContext(parent, "tcp", "target.example:443"); err == nil {
+		t.Fatal("DialContext unexpectedly succeeded after parent cancellation")
+	}
+
+	want := []string{"primary"}
+	if got := rec.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("parent-cancelled calls = %v, want %v", got, want)
+	}
+}
+
 func TestBalancerAliveSkipsFailedPrimaryOnNextDial(t *testing.T) {
 	rec := &balancerCallRecorder{}
 	primary := &recordingBalancerDialer{tag: "primary", rec: rec}
@@ -292,6 +355,28 @@ func TestBalancerDialPacketUsesSameSelectionPolicy(t *testing.T) {
 	want := []string{"a:udp", "b:udp"}
 	if got := rec.snapshot(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("udp calls = %v, want %v", got, want)
+	}
+}
+
+func TestBalancerDialPacketFallsForwardWhenFirstMemberStalls(t *testing.T) {
+	rec := &balancerCallRecorder{}
+	primary := &recordingBalancerDialer{tag: "primary", rec: rec}
+	backup := &recordingBalancerDialer{tag: "backup", rec: rec}
+	primary.waitUDP.Store(true)
+	b := newTestBalancer(t, "alive", "alive", primary, backup)
+	b.attemptTimeout = 20 * time.Millisecond
+
+	parent, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	pc, err := b.DialPacket(parent, "8.8.8.8:53")
+	if err != nil {
+		t.Fatalf("DialPacket after stalled primary: %v", err)
+	}
+	_ = pc.Close()
+
+	want := []string{"primary:udp", "backup:udp"}
+	if got := rec.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("stalled-primary UDP fallback calls = %v, want %v", got, want)
 	}
 }
 

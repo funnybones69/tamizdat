@@ -94,7 +94,7 @@ func TestBootstrapLegacyShortID(t *testing.T) {
 		t.Fatalf("expected migration to happen")
 	}
 	var n int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM users WHERE name='default'`).Scan(&n); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM users WHERE name='anarki'`).Scan(&n); err != nil {
 		t.Fatalf("query: %v", err)
 	}
 	if n != 1 {

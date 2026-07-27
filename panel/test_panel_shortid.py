@@ -153,7 +153,7 @@ class PanelShortidTests(unittest.TestCase):
             self.panel.server_pubkey_from_settings = lambda: "11" * 32
             self.panel._get_user_shortid = lambda _uid: "22" * 8
             self.panel.get_inbound_settings = lambda: {
-                "inbound_masquerade_domain": "cover.example.com",
+                "inbound_masquerade_domain": "storage.yandexcloud.net",
                 "inbound_fingerprint": "mix",
                 "inbound_bootstrap_sni": "",
                 "inbound_public_port": 443,
@@ -176,7 +176,7 @@ class PanelShortidTests(unittest.TestCase):
         u = self.panel.create_user({"name": "api-host-user", "outbound_tag": "direct"})
         with self.panel.db_conn() as con:
             con.execute(
-                "INSERT INTO settings(key,value) VALUES('panel_hostname','server.example.com') "
+                "INSERT INTO settings(key,value) VALUES('panel_hostname','api.example.com') "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
             )
 
@@ -189,7 +189,7 @@ class PanelShortidTests(unittest.TestCase):
             setattr(self.panel, "server_pubkey_from_settings", lambda: "11" * 32)
             setattr(self.panel, "_get_user_shortid", lambda _uid: "22" * 8)
             setattr(self.panel, "get_inbound_settings", lambda: {
-                "inbound_masquerade_domain": "cover.example.com",
+                "inbound_masquerade_domain": "storage.yandexcloud.net",
                 "inbound_fingerprint": "mix",
                 "inbound_bootstrap_sni": "",
                 "inbound_public_port": 443,
@@ -202,7 +202,7 @@ class PanelShortidTests(unittest.TestCase):
             setattr(self.panel, "get_inbound_settings", prev_settings)
             setattr(self.panel, "SERVER_HOST", prev_host)
 
-        self.assertTrue(uri.startswith("tamizdat://server.example.com:443/"), uri)
+        self.assertTrue(uri.startswith("tamizdat://api.example.com:443/"), uri)
         self.assertNotIn("tamizdat://example.com", uri)
 
     def test_reset_user_quota_preserves_traffic_counters(self):
@@ -799,7 +799,7 @@ class SettingsRefactorPhase2Tests(unittest.TestCase):
             con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('panel_hostname','')")
             con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('inbound_priv_key',?)", ("a" * 64,))
             con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('inbound_public_port','443')")
-            con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('inbound_masquerade_domain','cover.example.com')")
+            con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('inbound_masquerade_domain','storage.yandexcloud.net')")
             con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('inbound_fingerprint','mix')")
         prev_host = self.panel.SERVER_HOST
         os.environ["TAMIZDAT_PANEL_SERVER_HOST"] = "env-host.example"
@@ -816,14 +816,14 @@ class SettingsRefactorPhase2Tests(unittest.TestCase):
         """Dead/legacy config generators must not reintroduce SERVER_HOST/example.com."""
         with self.panel.db_conn() as con:
             con.execute(
-                "INSERT OR REPLACE INTO settings(key,value) VALUES('panel_hostname','server.example.com')"
+                "INSERT OR REPLACE INTO settings(key,value) VALUES('panel_hostname','api.example.com')"
             )
         cfg = {"inbounds": [{
             "type": "tamizdat",
             "private_key": "b" * 64,
             "master_short_id": "22" * 8,
             "public_port": 443,
-            "masquerade_domain": "cover.example.com",
+            "masquerade_domain": "storage.yandexcloud.net",
             "fingerprint": "mix",
         }]}
         prev_host = self.panel.SERVER_HOST
@@ -833,8 +833,8 @@ class SettingsRefactorPhase2Tests(unittest.TestCase):
             js = self.panel.make_tamizdat_json(cfg)
         finally:
             setattr(self.panel, "SERVER_HOST", prev_host)
-        self.assertTrue(uri.startswith("tamizdat://server.example.com:443/"), uri)
-        self.assertEqual(js["server"], "server.example.com:443")
+        self.assertTrue(uri.startswith("tamizdat://api.example.com:443/"), uri)
+        self.assertEqual(js["server"], "api.example.com:443")
 
     def test_legacy_inbound_migration(self):
         """One-shot migration: pre-Phase-2 install has a populated
@@ -1141,7 +1141,7 @@ class SettingsSavePropagationTests(unittest.TestCase):
             "wgturn_enabled":            "1",
             "wgturn_listen":             "0.0.0.0:5000",
             "wgturn_wg_port":            "56001",
-            "wgturn_outbound_tag":       "fallback-example",
+            "wgturn_outbound_tag":       "sync2-justhost-fi",
         }
         changed = self.panel.put_inbound_settings(flat)
         self.assertIn("inbound_masquerade_domain", changed)
@@ -1153,7 +1153,7 @@ class SettingsSavePropagationTests(unittest.TestCase):
         self.assertEqual(s["wgturn_enabled"], "1")
         self.assertEqual(s["wgturn_listen"], "0.0.0.0:5000")
         self.assertEqual(s["wgturn_wg_port"], "56001")
-        self.assertEqual(s["wgturn_outbound_tag"], "fallback-example")
+        self.assertEqual(s["wgturn_outbound_tag"], "sync2-justhost-fi")
 
     def test_save_panel_payload_round_trips(self):
         """settingsSaveAll → savePanel JSON shape persists to panel_* rows."""

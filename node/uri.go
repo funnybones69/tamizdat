@@ -38,7 +38,7 @@ type Profile struct {
 	BytesPerTransportSoftCap int64
 }
 
-// ParseURI parses the canonical F-shape tamizdat URI:
+// ParseURI parses the canonical F-shape samizdat URI:
 // tamizdat://<master_hex>@<host>:<port>?pbk=<hex>&sni=<hostname>[&cpool=<csv>]#<label>
 func ParseURI(raw string) (*Profile, error) {
 	raw = strings.TrimSpace(raw)

@@ -1,5 +1,5 @@
 {
-  "_comment": "Example config for tamizdat-node. Edit placeholders before use.",
+  "_comment": "Example config for samizdat-node. Mix of inbound + outbound types with rule-based routing similar to xray-core. Edit the placeholders in <ANGLE_BRACKETS> before use.",
   "log": { "level": "info" },
   "inbounds": [
     {
@@ -13,32 +13,34 @@
       "listen": "127.0.0.1:8118"
     },
     {
-      "_comment": "Optional: also act as a Tamizdat server. Remove this block to disable.",
-      "tag": "tamizdat-in",
-      "protocol": "tamizdat",
+      "_comment": "Optional: also act as a samizdat *server* on :443. Drop this block to disable.",
+      "tag": "samizdat-in",
+      "protocol": "samizdat",
       "listen": ":8443",
       "settings": {
-        "private_key_hex": "<SERVER_X25519_PRIVATE_KEY_HEX>",
-        "shortids_hex": ["<USER_SHORT_ID_HEX>"],
-        "cert_pem_path": "/etc/tamizdat/cert.pem",
-        "key_pem_path": "/etc/tamizdat/key.pem",
-        "masquerade_domain": "cover.example.com",
+        "private_key_hex": "<SERVER_X25519_PRIV_HEX_64_CHARS>",
+        "shortids_hex": ["<SHORTID_HEX_16_CHARS>"],
+        "cert_pem_path": "/etc/samizdat/cert.pem",
+        "key_pem_path":  "/etc/samizdat/key.pem",
+        "masquerade_domain": "ok.ru",
         "masquerade_pool": {
-          "cover.example.com": "cover.example.com:443"
+          "ok.ru":   "ok.ru:443",
+          "vk.com":  "vk.com:443",
+          "mail.ru": "mail.ru:443"
         }
       }
     }
   ],
   "outbounds": [
     {
-      "tag": "tamizdat-out",
-      "protocol": "tamizdat",
+      "tag": "samizdat-out",
+      "protocol": "samizdat",
       "settings": {
-        "server_addr": "server.example.com:443",
-        "server_names": ["cover.example.com"],
-        "public_key_hex": "<SERVER_X25519_PUBLIC_KEY_HEX>",
-        "shortids_hex": ["<USER_SHORT_ID_HEX>"],
-        "fingerprint": "chrome",
+        "server_addr":   "samizdat.example.org:443",
+        "server_names":  ["ok.ru", "vk.com", "mail.ru"],
+        "public_key_hex":"<SERVER_X25519_PUB_HEX_64_CHARS>",
+        "shortids_hex":  ["<SHORTID_HEX_16_CHARS>"],
+        "fingerprint":   "chrome",
         "min_transports": 2,
         "bytes_per_transport_soft_cap": 13312,
         "cover_traffic_enabled": true
@@ -55,18 +57,20 @@
   ],
   "routing": {
     "domain_strategy": "IPIfNonMatch",
-    "default_outbound": "tamizdat-out",
+    "default_outbound": "samizdat-out",
     "rules": [
-      {
-        "_comment": "Private networks stay direct.",
+      { "_comment": "Drop ad/tracker/private domains entirely.",
+        "domain": ["domain:doubleclick.net", "domain:googletagmanager.com", "keyword:tracker"],
+        "outbound": "block" },
+      { "_comment": "Private RFC1918 + loopback + link-local stay direct.",
         "ip": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "169.254.0.0/16", "::1/128", "fe80::/10"],
-        "outbound": "direct"
-      },
-      {
-        "_comment": "Example blocked domains.",
-        "domain": ["domain:ads.example", "keyword:tracker"],
-        "outbound": "block"
-      }
+        "outbound": "direct" },
+      { "_comment": "Russian sites stay direct (no point tunnelling them out).",
+        "domain": ["domain:yandex.ru", "domain:vk.com", "domain:ok.ru", "domain:mail.ru", "domain:rt.com", "regexp:\\.ru$"],
+        "outbound": "direct" },
+      { "_comment": "DNS over UDP stays direct.",
+        "network": "udp", "port": "53",
+        "outbound": "direct" }
     ]
   }
 }

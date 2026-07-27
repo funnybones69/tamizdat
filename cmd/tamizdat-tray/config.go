@@ -3,13 +3,11 @@
 package main
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -17,24 +15,13 @@ import (
 )
 
 const configFileName = "config.uri"
-const stateFileName = "tamizdat-tray.state"
 
-type ServerProfile struct {
-	Label  string // host:port shown in the tray Servers submenu
-	Config *Config
-}
-
-// Config is loaded from one tamizdat:// URI. config.uri may contain several
-// non-empty URI lines; each line becomes a ServerProfile, and the first URI is
-// used on launch. Core connection settings stay in the URI that is passed to
-// the embedded TUN engine unchanged; optional tray/TUN tuning knobs are
-// accepted as extra query parameters.
+// Config is loaded from a single tamizdat:// URI. Core connection settings
+// stay in the URI that is passed to the embedded TUN engine unchanged; optional
+// tray/TUN tuning knobs are accepted as extra query parameters.
 type Config struct {
 	URI                        string
 	Server                     string // host:port
-	StatePath                  string // local state file that remembers the last selected profile
-	Profiles                   []ServerProfile
-	ProfileIndex               int
 	Transport                  string // h2 (default) or fragpoc
 	Debug                      bool   // optional; verbose TUN flow diagnostics
 	DebugListen                string // optional; 127.0.0.1:port for child /debug/vars
@@ -71,123 +58,14 @@ func loadConfig(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	uris := configURIs(string(raw))
-	if len(uris) == 0 {
-		return nil, errors.New("config: empty URI")
-	}
-
-	configs := make([]*Config, 0, len(uris))
-	for i, rawURI := range uris {
-		cfg, err := parseConfigURI(rawURI)
-		if err != nil {
-			return nil, fmt.Errorf("config URI #%d: %w", i+1, err)
-		}
-		configs = append(configs, cfg)
-	}
-	labels := uniqueServerLabels(configs)
-	profiles := make([]ServerProfile, 0, len(configs))
-	for i, cfg := range configs {
-		profiles = append(profiles, ServerProfile{Label: labels[i], Config: cfg})
-	}
-	statePath := filepath.Join(filepath.Dir(path), stateFileName)
-	for i, cfg := range configs {
-		cfg.Profiles = profiles
-		cfg.ProfileIndex = i
-		cfg.StatePath = statePath
-	}
-	return configs[loadActiveProfileIndex(statePath, configs)], nil
-}
-
-func profileStateKey(cfg *Config) string {
-	if cfg == nil {
-		return ""
-	}
-	sum := sha256.Sum256([]byte(cfg.URI))
-	return hex.EncodeToString(sum[:])
-}
-
-func loadActiveProfileIndex(path string, configs []*Config) int {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0
-	}
-	var key string
-	for _, line := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
-			continue
-		}
-		if v, ok := strings.CutPrefix(line, "active_uri_sha256="); ok {
-			key = strings.TrimSpace(v)
-			break
-		}
-		// Backward-compatible fallback for an older ad-hoc state file that
-		// contained only the hash on the first line.
-		key = line
-		break
-	}
-	if key == "" {
-		return 0
-	}
-	for i, cfg := range configs {
-		if profileStateKey(cfg) == key {
-			return i
-		}
-	}
-	return 0
-}
-
-func saveActiveProfile(path string, cfg *Config) error {
-	if path == "" || cfg == nil {
-		return nil
-	}
-	content := fmt.Sprintf("active_uri_sha256=%s\n", profileStateKey(cfg))
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
-}
-
-func configURIs(raw string) []string {
-	var uris []string
-	for _, line := range strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
-			continue
-		}
-		uris = append(uris, line)
-	}
-	return uris
-}
-
-func uniqueServerLabels(configs []*Config) []string {
-	labels := make([]string, len(configs))
-	seen := map[string]int{}
-	for i, cfg := range configs {
-		label := cfg.Server
-		if label == "" {
-			label = fmt.Sprintf("server-%d", i+1)
-		}
-		seen[label]++
-		if seen[label] > 1 {
-			labels[i] = fmt.Sprintf("%s (%d)", label, seen[label])
-		} else {
-			labels[i] = label
-		}
-	}
-	return labels
-}
-
-func parseConfigURI(rawURI string) (*Config, error) {
-	rawURI = strings.TrimSpace(rawURI)
+	rawURI := strings.TrimSpace(string(raw))
 	if rawURI == "" {
-		return nil, errors.New("empty URI")
+		return nil, errors.New("config: empty URI")
 	}
 
 	parsed, err := configurl.Parse(rawURI)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("config URI: %w", err)
 	}
 	u, err := url.Parse(rawURI)
 	if err != nil {

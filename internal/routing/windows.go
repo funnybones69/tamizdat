@@ -41,15 +41,15 @@ type routingState struct {
 	selectiveDone    chan struct{}
 	// bypass-routes mode: default goes via TUN, but listed hosts are pinned
 	// through the physical gateway (so they bypass the tunnel). Use case:
-	// keep selected management/control APIs reachable when the tunnel might be
-	// down or geo-blocked from the exit point.
+	// keep AI provider APIs (Anthropic, OpenAI) reachable when the tunnel
+	// might be down or geo-blocked from the exit point.
 	bypassHosts  []string
 	bypassRoutes map[string]struct{} // currently installed /32 routes via origGateway
-	serverIPs    map[string]struct{} // skip routing tamizdat-server IP through tamizdat TUN
+	serverIPs    map[string]struct{} // skip routing samizdat-server IP through samizdat TUN
 }
 
 // configureAutoRouting snapshots the current default gateway, pins a host-route
-// to the tamizdat server through it, assigns an IP to the TUN, and either:
+// to the samizdat server through it, assigns an IP to the TUN, and either:
 //   - installs a default route via TUN (default-route mode), OR
 //   - installs /32 host-routes for each --selective-routes hostname (selective mode).
 //
@@ -83,7 +83,7 @@ func ConfigureAutoRouting(ctx context.Context, serverHost, tunAlias, tunIP strin
 	state.serverIP = serverIP
 	state.serverIPs[serverIP] = struct{}{}
 	// Also collect any other A-records for serverHost so we never accidentally
-	// route the tamizdat server itself through the tamizdat TUN.
+	// route the samizdat server itself through the samizdat TUN.
 	if hostOnly := stripPort(serverHost); hostOnly != "" && net.ParseIP(hostOnly) == nil {
 		if all, e := resolveAllIPv4(ctx, hostOnly); e == nil {
 			for _, ip := range all {
@@ -150,8 +150,8 @@ func ConfigureAutoRouting(ctx context.Context, serverHost, tunAlias, tunIP strin
 		// Bypass /32 routes MUST be installed BEFORE the default route flips
 		// to TUN. Once 0.0.0.0/0 points at TUN, DNS UDP traffic to bypass
 		// resolvers (1.1.1.1, 8.8.8.8, …) sinks into TUN — which doesn't
-		// transit UDP — so name lookups for bypassed hosts may fail.
-		// Resolve them now while the system DNS still works through the
+		// transit UDP — so name lookups for AI hosts (api.anthropic.com etc)
+		// fail. Resolve them now while the system DNS still works through the
 		// physical gateway, then pin the resulting IPs.
 		if len(bypassHosts) > 0 {
 			state.bypassRoutes = map[string]struct{}{}
@@ -218,7 +218,7 @@ func (s *routingState) refreshSelectiveRoutes(ctx context.Context) (int, int) {
 		}
 		for _, ip := range ips {
 			if _, srv := s.serverIPs[ip]; srv {
-				log.Printf("selective-routes: skipping %s (tamizdat server IP)", ip)
+				log.Printf("selective-routes: skipping %s (samizdat server IP)", ip)
 				continue
 			}
 			if _, exists := desired[ip]; !exists {
@@ -471,7 +471,7 @@ func resolveIPv4(ctx context.Context, hostOrAddr string) (string, error) {
 		if ip4 := ip.To4(); ip4 != nil {
 			return ip4.String(), nil
 		}
-		return "", fmt.Errorf("server is IPv6 literal %q; tamizdat is IPv4-only", host)
+		return "", fmt.Errorf("server is IPv6 literal %q; samizdat is IPv4-only", host)
 	}
 	resolver := net.DefaultResolver
 	addrs, err := resolver.LookupIPAddr(ctx, host)
@@ -527,7 +527,7 @@ func stripPort(hostOrAddr string) string {
 // interface alias it points to.
 //
 // On-link defaults (NextHop=0.0.0.0, owned by VPN/TUN adapters) are skipped:
-// tamizdat needs a concrete gateway IP to pin its outer dials away from any TUN.
+// samizdat needs a concrete gateway IP to pin its outer dials away from any TUN.
 func snapshotDefaultRoute(ctx context.Context) (gateway, ifaceAlias, metric string, err error) {
 	psCmd := `Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' | Where-Object { $_.NextHop -ne '0.0.0.0' } | Sort-Object RouteMetric | Select-Object -First 1 -Property NextHop,InterfaceAlias,RouteMetric | Format-List`
 	if out, e := runCmd(ctx, "powershell.exe", "-NoProfile", "-Command", psCmd); e == nil {

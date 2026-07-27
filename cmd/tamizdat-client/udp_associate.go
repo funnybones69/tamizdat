@@ -164,7 +164,7 @@ func handleUDPAssociate(c net.Conn, sc socksDialer, cfg socksConfig) {
 		// whose String() differs from the CONNECT authority — pass nil to
 		// signal "use the bound target" without triggering the single-target
 		// guard. (Was previously passing &dummyAddr{} which got rejected with
-		// 'tamizdat: udp tunnel is bound to a single target' and silently
+		// 'samizdat: udp tunnel is bound to a single target' and silently
 		// dropped all SOCKS5-UDP datagrams.)
 		if _, werr := f.pc.WriteTo(data, nil); werr != nil && cfg.Debug {
 			log.Printf("UDP tunnel WriteTo %s: %v", dest, werr)

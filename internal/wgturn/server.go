@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/pion/dtls/v3"
 	"github.com/pion/dtls/v3/pkg/crypto/selfsign"
@@ -116,6 +117,16 @@ type Server struct {
 	devices        map[string]*clientDevice
 	identitiesByIP map[string]ClientIdentity
 
+	// Bond v2 state is deliberately separate from the legacy connection and
+	// device locks. The two function fields are test seams; production leaves
+	// them nil and uses the real device provisioner and connected UDP socket.
+	bondsMu       sync.Mutex
+	bonds         map[bondKey]*serverBond
+	bondClaims    map[bondKey]*bondClaim
+	bondDialWG    func() (net.Conn, error)
+	bondProvision func(localPort, deviceID string) (*clientDevice, string, error)
+	bondClosed    atomic.Bool
+
 	activeConns int32
 	totalConns  int64
 }
@@ -147,6 +158,8 @@ func NewServer(cfg Config) (*Server, error) {
 		keys:           keys,
 		devices:        make(map[string]*clientDevice),
 		identitiesByIP: make(map[string]ClientIdentity),
+		bonds:          make(map[bondKey]*serverBond),
+		bondClaims:     make(map[bondKey]*bondClaim),
 	}
 	s.loadDevices()
 
@@ -295,8 +308,20 @@ func (s *Server) Start(ctx context.Context) error {
 
 // Shutdown tears down the WireGuard device and closes the DTLS listener.
 func (s *Server) Shutdown() {
+	s.bondClosed.Store(true)
 	if s.listener != nil {
 		s.listener.Close()
+	}
+	s.bondsMu.Lock()
+	bonds := make([]*serverBond, 0, len(s.bonds))
+	for _, bond := range s.bonds {
+		bonds = append(bonds, bond)
+	}
+	s.bonds = make(map[bondKey]*serverBond)
+	s.bondClaims = make(map[bondKey]*bondClaim)
+	s.bondsMu.Unlock()
+	for _, bond := range bonds {
+		bond.close()
 	}
 	if s.bridge != nil {
 		s.bridge.Close()

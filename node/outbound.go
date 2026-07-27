@@ -18,7 +18,7 @@ type Outbound interface {
 }
 
 // UDPDialer is the optional interface for outbounds that can carry UDP.
-// freedom and tamizdat implement it; blackhole does not (drops both).
+// freedom and samizdat implement it; blackhole does not (drops both).
 type UDPDialer interface {
 	DialPacket(ctx context.Context, req *Request) (net.PacketConn, error)
 }

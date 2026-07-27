@@ -5,7 +5,7 @@
 // The dispatcher is rule-evaluation-only: every Outbound is a no-op stub.
 // The server still uses internal/outbounds.Registry for the actual dial.
 // This package therefore lives outside the root `tamizdat` package to keep
-// the inbound_tamizdat → tamizdat import edge clean (no node ⇄ tamizdat
+// the inbound_samizdat → tamizdat import edge clean (no node ⇄ tamizdat
 // cycle).
 package rulesdb
 

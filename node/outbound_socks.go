@@ -13,7 +13,7 @@ import (
 )
 
 // SocksOutbound forwards each Dial as a SOCKS5 CONNECT request to an upstream
-// SOCKS5 proxy (e.g. another tamizdat-node, ssh -D, etc.).
+// SOCKS5 proxy (e.g. another samizdat-node, ssh -D, etc.).
 //
 // Supported: NO AUTH (0x00) and USER/PASS (0x02).
 // Unsupported: GSSAPI, SOCKS5 BIND, SOCKS5 UDP-ASSOCIATE.

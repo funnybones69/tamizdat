@@ -20,6 +20,7 @@ const (
 	BalancerModeAlive      = "alive"
 
 	balancerAliveFailureCooldown = 30 * time.Second
+	balancerMemberAttemptTimeout = 3 * time.Second
 )
 
 // BalancerConfig is stored in the outbounds.uri column for kind="balancer".
@@ -201,6 +202,7 @@ type BalancerDialer struct {
 	members           []balancerMember
 	next              atomic.Uint64
 	aliveCooldown     time.Duration
+	attemptTimeout    time.Duration
 	failoverOnHighRTT bool
 	rttThresholdMs    int64
 	cooldowns         []atomic.Int64
@@ -243,6 +245,7 @@ func newBalancerDialer(tag string, cfg BalancerConfig, byTag map[string]*tracked
 		mode:              mode,
 		members:           members,
 		aliveCooldown:     balancerAliveFailureCooldown,
+		attemptTimeout:    balancerMemberAttemptTimeout,
 		failoverOnHighRTT: cfg.FailoverOnHighRTT && rttThresholdMs > 0,
 		rttThresholdMs:    rttThresholdMs,
 		cooldowns:         make([]atomic.Int64, len(members)),
@@ -259,7 +262,9 @@ func (b *BalancerDialer) DialContext(ctx context.Context, network, target string
 	for _, choice := range b.orderedMembers() {
 		member := choice.member
 		lease := member.dialer.acquire(rec)
-		conn, err := lease.DialContext(ctx, network, target)
+		attemptCtx, cancel := b.memberAttemptContext(ctx)
+		conn, err := lease.DialContext(attemptCtx, network, target)
+		cancel()
 		if err == nil {
 			b.noteSuccess(choice.index)
 			return &balancerConn{Conn: conn, lease: lease}, nil
@@ -283,7 +288,9 @@ func (b *BalancerDialer) DialPacket(ctx context.Context, target string) (net.Pac
 	for _, choice := range b.orderedMembers() {
 		member := choice.member
 		lease := member.dialer.acquire(rec)
-		pc, err := lease.DialPacket(ctx, target)
+		attemptCtx, cancel := b.memberAttemptContext(ctx)
+		pc, err := lease.DialPacket(attemptCtx, target)
+		cancel()
 		if err == nil {
 			b.noteSuccess(choice.index)
 			return &balancerPacketConn{PacketConn: pc, lease: lease}, nil
@@ -296,6 +303,19 @@ func (b *BalancerDialer) DialPacket(ctx context.Context, target string) (net.Pac
 		}
 	}
 	return nil, b.allFailedError("udp", target, errs)
+}
+
+// memberAttemptContext bounds one member without consuming the caller's whole
+// deadline. Previously a stalled first member held the parent context until it
+// expired; the subsequent ctx.Err check then aborted the loop, so an "alive"
+// balancer never reached its backup. DialContext semantics only use the context
+// to establish the connection, so cancelling this child after the attempt does
+// not own the lifetime of a successfully returned Conn or PacketConn.
+func (b *BalancerDialer) memberAttemptContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if b == nil || b.attemptTimeout <= 0 {
+		return parent, func() {}
+	}
+	return context.WithTimeout(parent, b.attemptTimeout)
 }
 
 func (b *BalancerDialer) Close() error { return nil }

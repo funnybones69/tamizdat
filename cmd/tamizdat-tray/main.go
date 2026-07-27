@@ -5,10 +5,8 @@
 // Wintun driver are embedded and extracted at first start to
 // %LOCALAPPDATA%\Tamizdat-Tray\.
 //
-// Reads config.uri next to the executable: one tamizdat:// URI per non-empty
-// line. With multiple URI lines, the tray shows a Servers submenu and reconnects
-// when another server is selected.
-// Base menu: Connect/Disconnect, optional Servers, Show Log / Hide Log, Exit.
+// Reads config.uri next to the executable: one tamizdat:// URI per file.
+// Three-item menu: Connect/Disconnect, Show Log / Hide Log, Exit.
 // The TUN engine itself owns route configuration (--auto-route=true).
 package main
 
@@ -52,10 +50,10 @@ func main() {
 	}
 
 	ring := newLogRing(2000)
-	logPath := filepath.Join(workDir, "tamizdat-tray.log")
-	if f, ferr := openRotatingLogWriter(logPath, trayLogMaxBytes, trayLogMaxBackups); ferr == nil {
+	if f, ferr := os.OpenFile(filepath.Join(workDir, "tamizdat-tray.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); ferr == nil {
 		defer f.Close()
 		ring.SetFile(f)
+		ring.Log("file-log: %s", filepath.Join(workDir, "tamizdat-tray.log"))
 	}
 	app := newTrayApp(cfg, tunExe, ring)
 	systray.Run(app.onReady, app.onExit)

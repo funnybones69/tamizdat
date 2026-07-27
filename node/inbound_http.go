@@ -99,7 +99,7 @@ func (h *HTTPInbound) handle(ctx context.Context, c net.Conn, d InboundDispatche
 	if h.username != "" || h.password != "" {
 		if !h.checkAuth(req) {
 			_, _ = c.Write([]byte("HTTP/1.1 407 Proxy Authentication Required\r\n" +
-				"Proxy-Authenticate: Basic realm=\"tamizdat\"\r\n" +
+				"Proxy-Authenticate: Basic realm=\"samizdat\"\r\n" +
 				"Connection: close\r\n\r\n"))
 			return
 		}

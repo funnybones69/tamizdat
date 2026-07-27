@@ -166,7 +166,7 @@ func buildOutbound(oc OutboundConfig) (Outbound, error) {
 	case "blackhole":
 		return NewBlackholeOutbound(oc.Tag), nil
 	case "tamizdat":
-		return NewTamizdatOutbound(oc.Tag, oc.Settings)
+		return NewSamizdatOutbound(oc.Tag, oc.Settings)
 	case "socks":
 		return NewSocksOutbound(oc.Tag, oc.Settings)
 	default:
@@ -181,7 +181,7 @@ func buildInbound(ic InboundConfig) (Inbound, error) {
 	case "http":
 		return NewHTTPInbound(ic.Tag, ic.Listen, ic.Settings)
 	case "tamizdat":
-		return NewTamizdatInbound(ic.Tag, ic.Listen, ic.Settings)
+		return NewSamizdatInbound(ic.Tag, ic.Listen, ic.Settings)
 	default:
 		return nil, fmt.Errorf("unknown inbound protocol %q", ic.Protocol)
 	}

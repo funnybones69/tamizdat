@@ -32,8 +32,8 @@ type failingProxyClient struct {
 
 func TestRetryableDialErrorRecognizesCarrierOpenFailures(t *testing.T) {
 	cases := []error{
-		errors.New("read tcp 172.20.10.2:50123->203.0.113.10:31502: i/o timeout"),
-		errors.New("read tcp 172.20.10.2:50123->203.0.113.10:31502: wsarecv: An existing connection was forcibly closed by the remote host."),
+		errors.New("read tcp 172.20.10.2:50123->91.149.255.114:31502: i/o timeout"),
+		errors.New("read tcp 172.20.10.2:50123->91.149.255.114:31502: wsarecv: An existing connection was forcibly closed by the remote host."),
 		errors.New("EOF"),
 		context.DeadlineExceeded,
 		errors.New("fragpoc: scheduler backpressure"),
@@ -59,14 +59,14 @@ func TestPrivateDestinationDetection(t *testing.T) {
 			t.Fatalf("isPrivateDestination(%s) = false, want true", ip)
 		}
 	}
-	if isPrivateDestination(netip.MustParseAddr("203.0.113.10")) {
-		t.Fatal("isPrivateDestination(203.0.113.10) = true, want false")
+	if isPrivateDestination(netip.MustParseAddr("91.149.255.114")) {
+		t.Fatal("isPrivateDestination(91.149.255.114) = true, want false")
 	}
 }
 
 func TestBlockedEndpointDetection(t *testing.T) {
-	addr := netip.MustParseAddr("203.0.113.10")
-	d := &tamizdatProxyDialer{
+	addr := netip.MustParseAddr("91.149.255.114")
+	d := &samizdatProxyDialer{
 		blockedEndpoints: map[netip.AddrPort]struct{}{
 			netip.AddrPortFrom(addr, 31502): {},
 		},
@@ -80,7 +80,7 @@ func TestBlockedEndpointDetection(t *testing.T) {
 }
 
 func TestDialerDropsNonDNSUDPWhenPolicyEnabled(t *testing.T) {
-	d := &tamizdatProxyDialer{dropNonDNSUDP: true}
+	d := &samizdatProxyDialer{dropNonDNSUDP: true}
 	metadata := &M.Metadata{
 		Network: M.UDP,
 		SrcIP:   netip.MustParseAddr("10.255.0.2"),
@@ -94,7 +94,7 @@ func TestDialerDropsNonDNSUDPWhenPolicyEnabled(t *testing.T) {
 }
 
 func TestDialerDropsAllUDPWhenPolicyOff(t *testing.T) {
-	d := &tamizdatProxyDialer{dropAllUDP: true}
+	d := &samizdatProxyDialer{dropAllUDP: true}
 	metadata := &M.Metadata{
 		Network: M.UDP,
 		SrcIP:   netip.MustParseAddr("10.255.0.2"),
@@ -157,7 +157,7 @@ func (c *failingProxyClient) Close() error { return nil }
 // maxConcurrentPerTarget simultaneous opens so a page can parallelize its
 // connections to one CDN IP, and blocks the next open until a slot frees.
 func TestDialerTargetGateCapsConcurrentOpens(t *testing.T) {
-	dialer := &tamizdatProxyDialer{
+	dialer := &samizdatProxyDialer{
 		dialTargetCooldown: time.Second,
 		targetGates:        make(map[string]*targetGate),
 	}
@@ -190,7 +190,7 @@ func TestDialerTargetGateCapsConcurrentOpens(t *testing.T) {
 // only after targetFailuresBeforeCooldown consecutive failed opens. A single
 // transient failure on the restricted path must not block the destination.
 func TestDialerTargetCooldownNeedsConsecutiveFailures(t *testing.T) {
-	dialer := &tamizdatProxyDialer{
+	dialer := &samizdatProxyDialer{
 		dialTargetCooldown:    time.Second,
 		dialTargetCooldownMax: 30 * time.Second,
 		targetGates:           make(map[string]*targetGate),
@@ -222,7 +222,7 @@ func TestDialerTargetCooldownNeedsConsecutiveFailures(t *testing.T) {
 
 func TestNegativeTargetCooldownSerializesWithoutCooldown(t *testing.T) {
 	errClient := &failingProxyClient{err: context.DeadlineExceeded}
-	dialer := &tamizdatProxyDialer{
+	dialer := &samizdatProxyDialer{
 		client:             errClient,
 		dialAttemptTimeout: time.Millisecond,
 		dialTargetCooldown: -time.Millisecond,
@@ -249,7 +249,7 @@ func TestNegativeTargetCooldownSerializesWithoutCooldown(t *testing.T) {
 func TestDialerActiveConcurrencyReleasesOnClose(t *testing.T) {
 	client := &blockingProxyClient{release: make(chan struct{})}
 	close(client.release)
-	dialer := &tamizdatProxyDialer{
+	dialer := &samizdatProxyDialer{
 		client:             client,
 		dialAttemptTimeout: time.Second,
 		activeSlots:        make(chan struct{}, 1),
@@ -300,28 +300,28 @@ func TestDialerActiveConcurrencyReleasesOnClose(t *testing.T) {
 // (no escalation), clamped by dialTargetCooldownMax. An escalating cooldown
 // turned transient restricted-network failures into long blocks on the page.
 func TestTargetCooldownIsFlatAndClamped(t *testing.T) {
-	flat := &tamizdatProxyDialer{
+	flat := &samizdatProxyDialer{
 		dialTargetCooldown:    500 * time.Millisecond,
 		dialTargetCooldownMax: 30 * time.Second,
 	}
 	if got, want := flat.targetCooldownDuration(), 500*time.Millisecond; got != want {
 		t.Fatalf("flat cooldown = %s, want %s", got, want)
 	}
-	clamped := &tamizdatProxyDialer{
+	clamped := &samizdatProxyDialer{
 		dialTargetCooldown:    10 * time.Second,
 		dialTargetCooldownMax: 2 * time.Second,
 	}
 	if got, want := clamped.targetCooldownDuration(), 2*time.Second; got != want {
 		t.Fatalf("clamped cooldown = %s, want %s", got, want)
 	}
-	disabled := &tamizdatProxyDialer{dialTargetCooldown: -time.Millisecond}
+	disabled := &samizdatProxyDialer{dialTargetCooldown: -time.Millisecond}
 	if got := disabled.targetCooldownDuration(); got != 0 {
 		t.Fatalf("disabled cooldown = %s, want 0", got)
 	}
 }
 
 func TestTargetCooldownResetsAfterSuccess(t *testing.T) {
-	dialer := &tamizdatProxyDialer{
+	dialer := &samizdatProxyDialer{
 		dialTargetCooldown:    time.Second,
 		dialTargetCooldownMax: 30 * time.Second,
 		targetGates:           make(map[string]*targetGate),
@@ -369,7 +369,7 @@ func TestTargetCooldownResetsAfterSuccess(t *testing.T) {
 // than noisyTargetThreshold opens within one rate window is paced with a
 // cooldown even though every open succeeded.
 func TestDialerNoisyTargetThrottledAfterThreshold(t *testing.T) {
-	dialer := &tamizdatProxyDialer{
+	dialer := &samizdatProxyDialer{
 		dialTargetCooldown: time.Second, // positive → noisy suppression active
 		targetGates:        make(map[string]*targetGate),
 	}
@@ -396,7 +396,7 @@ func TestDialerNoisyTargetThrottledAfterThreshold(t *testing.T) {
 // TestDialerQuietTargetNotThrottled: a destination opened fewer than
 // noisyTargetThreshold times stays un-throttled — its next open is immediate.
 func TestDialerQuietTargetNotThrottled(t *testing.T) {
-	dialer := &tamizdatProxyDialer{
+	dialer := &samizdatProxyDialer{
 		dialTargetCooldown: time.Second,
 		targetGates:        make(map[string]*targetGate),
 	}
@@ -462,7 +462,7 @@ func TestTargetGateRateWindowStale(t *testing.T) {
 // TestDialerReapsStaleTargetGates: reapStaleTargetGates drops idle gates but
 // keeps gates that are in-flight or still inside a live rate window.
 func TestDialerReapsStaleTargetGates(t *testing.T) {
-	dialer := &tamizdatProxyDialer{
+	dialer := &samizdatProxyDialer{
 		dialTargetCooldown: time.Second,
 		targetGates:        make(map[string]*targetGate),
 	}
@@ -500,7 +500,7 @@ func TestDialerReapsStaleTargetGates(t *testing.T) {
 
 func TestDialerRejectsLateOuterDialAttempts(t *testing.T) {
 	client := &blockingProxyClient{release: make(chan struct{})}
-	dialer := &tamizdatProxyDialer{
+	dialer := &samizdatProxyDialer{
 		client:               client,
 		dialAttemptTimeout:   500 * time.Millisecond,
 		dialMinAttemptBudget: 200 * time.Millisecond,
@@ -527,7 +527,7 @@ func TestDialerRejectsLateOuterDialAttempts(t *testing.T) {
 
 func TestDialerRejectsLateAttemptAfterTargetQueue(t *testing.T) {
 	client := &blockingProxyClient{release: make(chan struct{})}
-	dialer := &tamizdatProxyDialer{
+	dialer := &samizdatProxyDialer{
 		client:               client,
 		dialAttemptTimeout:   500 * time.Millisecond,
 		dialTargetCooldown:   time.Millisecond,
@@ -582,7 +582,7 @@ func TestDialerRejectsLateAttemptAfterTargetQueue(t *testing.T) {
 
 func TestDialerRecoveryBackoffTripsAfterFailures(t *testing.T) {
 	errClient := &failingProxyClient{err: errors.New("fragpoc: scheduler backpressure")}
-	dialer := &tamizdatProxyDialer{
+	dialer := &samizdatProxyDialer{
 		client:                errClient,
 		dialAttemptTimeout:    time.Millisecond,
 		dialRecoveryThreshold: 2,
@@ -621,7 +621,7 @@ func TestDialerRecoveryBackoffTripsAfterFailures(t *testing.T) {
 func TestDialerRecoveryBackoffResetsAfterSuccess(t *testing.T) {
 	client := &blockingProxyClient{release: make(chan struct{})}
 	close(client.release)
-	dialer := &tamizdatProxyDialer{
+	dialer := &samizdatProxyDialer{
 		client:                client,
 		dialAttemptTimeout:    time.Second,
 		dialRecoveryThreshold: 2,
@@ -651,7 +651,7 @@ func TestDialerRecoveryBackoffResetsAfterSuccess(t *testing.T) {
 }
 
 func TestDialerRecoveryBackoffWaitsInsteadOfFailingFast(t *testing.T) {
-	dialer := &tamizdatProxyDialer{
+	dialer := &samizdatProxyDialer{
 		dialRecoveryThreshold: 1,
 		dialRecoveryBackoff:   time.Second,
 	}
@@ -670,7 +670,7 @@ func TestDialerRecoveryBackoffWaitsInsteadOfFailingFast(t *testing.T) {
 
 // drainOpenPaceBurst consumes the full initial token-bucket burst so a
 // subsequent acquire exercises the throttle path.
-func drainOpenPaceBurst(t *testing.T, d *tamizdatProxyDialer) {
+func drainOpenPaceBurst(t *testing.T, d *samizdatProxyDialer) {
 	t.Helper()
 	for i := 0; i < openPaceBurst; i++ {
 		if err := d.acquireOpenPace(context.Background()); err != nil {
@@ -683,7 +683,7 @@ func drainOpenPaceBurst(t *testing.T, d *tamizdatProxyDialer) {
 // starts full, so a page-load burst of up to openPaceBurst new flows is
 // admitted with no per-flow interval wait.
 func TestDialerOpenPaceBurstAdmitsInstantly(t *testing.T) {
-	d := &tamizdatProxyDialer{dialOpenInterval: 50 * time.Millisecond}
+	d := &samizdatProxyDialer{dialOpenInterval: 50 * time.Millisecond}
 	start := time.Now()
 	for i := 0; i < openPaceBurst; i++ {
 		if err := d.acquireOpenPace(context.Background()); err != nil {
@@ -699,7 +699,7 @@ func TestDialerOpenPaceBurstAdmitsInstantly(t *testing.T) {
 // TestDialerOpenPaceThrottlesAfterBurst: once the burst is spent, the next
 // acquire is throttled to roughly one refill interval.
 func TestDialerOpenPaceThrottlesAfterBurst(t *testing.T) {
-	d := &tamizdatProxyDialer{dialOpenInterval: 100 * time.Millisecond}
+	d := &samizdatProxyDialer{dialOpenInterval: 100 * time.Millisecond}
 	drainOpenPaceBurst(t, d)
 	start := time.Now()
 	if err := d.acquireOpenPace(context.Background()); err != nil {
@@ -714,7 +714,7 @@ func TestDialerOpenPaceThrottlesAfterBurst(t *testing.T) {
 // TestDialerOpenPaceRefillsWhileIdle: tokens accrue over time, so flows that
 // arrive after an idle gap are admitted without waiting.
 func TestDialerOpenPaceRefillsWhileIdle(t *testing.T) {
-	d := &tamizdatProxyDialer{dialOpenInterval: 40 * time.Millisecond}
+	d := &samizdatProxyDialer{dialOpenInterval: 40 * time.Millisecond}
 	drainOpenPaceBurst(t, d)
 	// Idle long enough for at least two tokens to refill.
 	time.Sleep(2*d.dialOpenInterval + d.dialOpenInterval/2)
@@ -733,7 +733,7 @@ func TestDialerOpenPaceRefillsWhileIdle(t *testing.T) {
 // TestDialerOpenPaceHonorsContextDeadline: when the bucket is empty the wait
 // for the next token must abort on context cancellation.
 func TestDialerOpenPaceHonorsContextDeadline(t *testing.T) {
-	d := &tamizdatProxyDialer{dialOpenInterval: time.Second}
+	d := &samizdatProxyDialer{dialOpenInterval: time.Second}
 	drainOpenPaceBurst(t, d)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
@@ -745,7 +745,7 @@ func TestDialerOpenPaceHonorsContextDeadline(t *testing.T) {
 // TestDialerOpenPaceDisabledWhenIntervalZero: a zero dialOpenInterval disables
 // the pacer entirely — every acquire returns immediately.
 func TestDialerOpenPaceDisabledWhenIntervalZero(t *testing.T) {
-	d := &tamizdatProxyDialer{dialOpenInterval: 0}
+	d := &samizdatProxyDialer{dialOpenInterval: 0}
 	start := time.Now()
 	for i := 0; i < 100; i++ {
 		if err := d.acquireOpenPace(context.Background()); err != nil {
@@ -774,7 +774,7 @@ func TestDialerDispatchesTCPThroughNodeDispatcher(t *testing.T) {
 		t.Fatalf("NewDispatcher: %v", err)
 	}
 
-	dialer := &tamizdatProxyDialer{dispatcher: dispatcher}
+	dialer := &samizdatProxyDialer{dispatcher: dispatcher}
 	metadata := &M.Metadata{
 		Network: M.TCP,
 		SrcIP:   netip.MustParseAddr("10.255.0.2"),

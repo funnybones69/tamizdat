@@ -17,7 +17,7 @@ import (
 	M "github.com/xjasonlyu/tun2socks/v2/metadata"
 )
 
-var currentDialer atomic.Pointer[tamizdatProxyDialer]
+var currentDialer atomic.Pointer[samizdatProxyDialer]
 
 func init() {
 	expvar.Publish("tamizdat_tun_dialer", expvar.Func(func() interface{} {
@@ -97,7 +97,7 @@ func isPrivateDestination(addr netip.Addr) bool {
 	return addr.Unmap().IsPrivate()
 }
 
-type tamizdatProxyDialer struct {
+type samizdatProxyDialer struct {
 	client                  ProxyClient
 	dispatcher              *node.Dispatcher
 	debug                   bool
@@ -182,7 +182,7 @@ const activeSlotIdleTimeout = 120 * time.Second
 const activeSlotEvictWait = 300 * time.Millisecond
 const activeSlotSoftEvictIdle = 15 * time.Second
 
-func newTamizdatProxyDialer(client ProxyClient, debug bool, dispatcher *node.Dispatcher, dialAttemptTimeout time.Duration, dialConcurrency int, dialActiveConcurrency int, dialOpenInterval time.Duration, dialTargetCooldown time.Duration, dialTargetCooldownMax time.Duration, dialMinAttemptBudget time.Duration, dialRecoveryThreshold int, dialRecoveryBackoff time.Duration, dropPrivateDestinations bool, dropAllUDP bool, dropNonDNSUDP bool, blockedEndpoints []netip.AddrPort) *tamizdatProxyDialer {
+func newSamizdatProxyDialer(client ProxyClient, debug bool, dispatcher *node.Dispatcher, dialAttemptTimeout time.Duration, dialConcurrency int, dialActiveConcurrency int, dialOpenInterval time.Duration, dialTargetCooldown time.Duration, dialTargetCooldownMax time.Duration, dialMinAttemptBudget time.Duration, dialRecoveryThreshold int, dialRecoveryBackoff time.Duration, dropPrivateDestinations bool, dropAllUDP bool, dropNonDNSUDP bool, blockedEndpoints []netip.AddrPort) *samizdatProxyDialer {
 	if dialAttemptTimeout <= 0 {
 		dialAttemptTimeout = defaultDialAttemptTimeout
 	}
@@ -200,7 +200,7 @@ func newTamizdatProxyDialer(client ProxyClient, debug bool, dispatcher *node.Dis
 			blocked[ep] = struct{}{}
 		}
 	}
-	d := &tamizdatProxyDialer{
+	d := &samizdatProxyDialer{
 		client:                  client,
 		dispatcher:              dispatcher,
 		debug:                   debug,
@@ -225,7 +225,7 @@ func newTamizdatProxyDialer(client ProxyClient, debug bool, dispatcher *node.Dis
 	return d
 }
 
-func (d *tamizdatProxyDialer) snapshot() map[string]any {
+func (d *samizdatProxyDialer) snapshot() map[string]any {
 	d.targetMu.Lock()
 	gates := len(d.targetGates)
 	d.targetMu.Unlock()
@@ -277,7 +277,7 @@ func (d *tamizdatProxyDialer) snapshot() map[string]any {
 	return out
 }
 
-func (d *tamizdatProxyDialer) summaryLoop() {
+func (d *samizdatProxyDialer) summaryLoop() {
 	t := time.NewTicker(dialerMetricsInterval)
 	defer t.Stop()
 	var lastUDPDropped, lastIPv6Drops, lastDialRetries uint64
@@ -335,12 +335,12 @@ func (d *tamizdatProxyDialer) summaryLoop() {
 	}
 }
 
-func (d *tamizdatProxyDialer) Stop() {
+func (d *samizdatProxyDialer) Stop() {
 	d.stopOnce.Store(true)
 	currentDialer.CompareAndSwap(d, nil)
 }
 
-func (d *tamizdatProxyDialer) DialContext(ctx context.Context, metadata *M.Metadata) (net.Conn, error) {
+func (d *samizdatProxyDialer) DialContext(ctx context.Context, metadata *M.Metadata) (net.Conn, error) {
 	if metadata == nil {
 		return nil, errors.New("nil metadata")
 	}
@@ -487,7 +487,7 @@ func (d *tamizdatProxyDialer) DialContext(ctx context.Context, metadata *M.Metad
 	return nil, err
 }
 
-func (d *tamizdatProxyDialer) requireAttemptBudget(ctx context.Context) error {
+func (d *samizdatProxyDialer) requireAttemptBudget(ctx context.Context) error {
 	if d.dialMinAttemptBudget <= 0 {
 		return nil
 	}
@@ -505,7 +505,7 @@ func (d *tamizdatProxyDialer) requireAttemptBudget(ctx context.Context) error {
 	return fmt.Errorf("%w: remaining %s < %s", errAttemptBudget, remaining.Round(time.Millisecond), d.dialMinAttemptBudget)
 }
 
-func (d *tamizdatProxyDialer) waitRecoveryWindow(ctx context.Context) error {
+func (d *samizdatProxyDialer) waitRecoveryWindow(ctx context.Context) error {
 	if d.dialRecoveryThreshold <= 0 || d.dialRecoveryBackoff <= 0 {
 		return nil
 	}
@@ -530,7 +530,7 @@ func (d *tamizdatProxyDialer) waitRecoveryWindow(ctx context.Context) error {
 	}
 }
 
-func (d *tamizdatProxyDialer) recordDialAdmission(success bool) {
+func (d *samizdatProxyDialer) recordDialAdmission(success bool) {
 	if d.dialRecoveryThreshold <= 0 || d.dialRecoveryBackoff <= 0 {
 		return
 	}
@@ -553,7 +553,7 @@ func (d *tamizdatProxyDialer) recordDialAdmission(success bool) {
 	log.Printf("[TCP-RECOVERY] pausing new TCP opens for %s after %d failed admissions", d.dialRecoveryBackoff, d.dialRecoveryThreshold)
 }
 
-func (d *tamizdatProxyDialer) dialTCP(ctx context.Context, metadata *M.Metadata, dest string) (net.Conn, error) {
+func (d *samizdatProxyDialer) dialTCP(ctx context.Context, metadata *M.Metadata, dest string) (net.Conn, error) {
 	if d.dispatcher != nil {
 		conn, _, err := d.dispatcher.Dispatch(ctx, requestFromMetadata(metadata))
 		return conn, err
@@ -564,7 +564,7 @@ func (d *tamizdatProxyDialer) dialTCP(ctx context.Context, metadata *M.Metadata,
 	return d.client.DialContext(ctx, "tcp", dest)
 }
 
-func (d *tamizdatProxyDialer) acquireOpenSlot(ctx context.Context) (func(), error) {
+func (d *samizdatProxyDialer) acquireOpenSlot(ctx context.Context) (func(), error) {
 	if d.openSlots == nil {
 		return func() {}, nil
 	}
@@ -576,7 +576,7 @@ func (d *tamizdatProxyDialer) acquireOpenSlot(ctx context.Context) (func(), erro
 	}
 }
 
-func (d *tamizdatProxyDialer) acquireActiveSlot(ctx context.Context) (func(), error) {
+func (d *samizdatProxyDialer) acquireActiveSlot(ctx context.Context) (func(), error) {
 	if d.activeSlots == nil {
 		return func() {}, nil
 	}
@@ -597,7 +597,7 @@ type activeSlotConn struct {
 	net.Conn
 	release      func()
 	once         sync.Once
-	dialer       *tamizdatProxyDialer
+	dialer       *samizdatProxyDialer
 	lastActivity atomic.Int64 // unix nanos of last non-empty Read/Write
 }
 
@@ -635,7 +635,7 @@ func (c *activeSlotConn) Close() error {
 	return c.Conn.Close()
 }
 
-func (d *tamizdatProxyDialer) registerActiveConn(c *activeSlotConn) {
+func (d *samizdatProxyDialer) registerActiveConn(c *activeSlotConn) {
 	d.activeMu.Lock()
 	if d.activeConns == nil {
 		d.activeConns = make(map[*activeSlotConn]struct{})
@@ -644,13 +644,13 @@ func (d *tamizdatProxyDialer) registerActiveConn(c *activeSlotConn) {
 	d.activeMu.Unlock()
 }
 
-func (d *tamizdatProxyDialer) unregisterActiveConn(c *activeSlotConn) {
+func (d *samizdatProxyDialer) unregisterActiveConn(c *activeSlotConn) {
 	d.activeMu.Lock()
 	delete(d.activeConns, c)
 	d.activeMu.Unlock()
 }
 
-func (d *tamizdatProxyDialer) evictOneIdleActiveConn() {
+func (d *samizdatProxyDialer) evictOneIdleActiveConn() {
 	now := time.Now()
 	var victim *activeSlotConn
 	var idle time.Duration
@@ -677,7 +677,7 @@ func (d *tamizdatProxyDialer) evictOneIdleActiveConn() {
 // slot would otherwise stay pinned forever and the emergency transport wedges
 // once every slot fills. Closing the conn releases the slot, unblocks any
 // gVisor Read/Write, and closes the underlying fragpoc stream.
-func (d *tamizdatProxyDialer) reapIdleActiveConns() {
+func (d *samizdatProxyDialer) reapIdleActiveConns() {
 	if d.activeSlots == nil || activeSlotIdleTimeout <= 0 {
 		return
 	}
@@ -697,7 +697,7 @@ func (d *tamizdatProxyDialer) reapIdleActiveConns() {
 	}
 }
 
-func (d *tamizdatProxyDialer) acquireOpenPace(ctx context.Context) error {
+func (d *samizdatProxyDialer) acquireOpenPace(ctx context.Context) error {
 	if d.dialOpenInterval <= 0 {
 		return nil
 	}
@@ -735,7 +735,7 @@ func (d *tamizdatProxyDialer) acquireOpenPace(ctx context.Context) error {
 	}
 }
 
-func (d *tamizdatProxyDialer) acquireTargetGate(ctx context.Context, target string) (func(success bool), error) {
+func (d *samizdatProxyDialer) acquireTargetGate(ctx context.Context, target string) (func(success bool), error) {
 	if !d.targetGateEnabled() {
 		return func(bool) {}, nil
 	}
@@ -788,7 +788,7 @@ func stopTimer(t *time.Timer) {
 	}
 }
 
-func (d *tamizdatProxyDialer) releaseTargetGate(target string, success bool) {
+func (d *samizdatProxyDialer) releaseTargetGate(target string, success bool) {
 	if !d.targetGateEnabled() {
 		return
 	}
@@ -864,7 +864,7 @@ func (g *targetGate) rateWindowStale(now time.Time) bool {
 // cooldown, and with an elapsed rate window. Without this, gates for targets
 // that fail once or are contacted once and never retried would accumulate for
 // the lifetime of the process.
-func (d *tamizdatProxyDialer) reapStaleTargetGates() {
+func (d *samizdatProxyDialer) reapStaleTargetGates() {
 	if !d.targetGateEnabled() {
 		return
 	}
@@ -878,7 +878,7 @@ func (d *tamizdatProxyDialer) reapStaleTargetGates() {
 	d.targetMu.Unlock()
 }
 
-func (d *tamizdatProxyDialer) targetGateEnabled() bool {
+func (d *samizdatProxyDialer) targetGateEnabled() bool {
 	return d.dialTargetCooldown != 0
 }
 
@@ -887,7 +887,7 @@ func (d *tamizdatProxyDialer) targetGateEnabled() bool {
 // escalate: an escalating per-target cooldown turned transient restricted-
 // network failures into multi-second blocks on the destination of the active
 // page. dialTargetCooldownMax only clamps an over-large configured base.
-func (d *tamizdatProxyDialer) targetCooldownDuration() time.Duration {
+func (d *samizdatProxyDialer) targetCooldownDuration() time.Duration {
 	if d.dialTargetCooldown <= 0 {
 		return 0
 	}
@@ -898,7 +898,7 @@ func (d *tamizdatProxyDialer) targetCooldownDuration() time.Duration {
 	return cooldown
 }
 
-func (d *tamizdatProxyDialer) isBlockedEndpoint(addr netip.Addr, port uint16) bool {
+func (d *samizdatProxyDialer) isBlockedEndpoint(addr netip.Addr, port uint16) bool {
 	if len(d.blockedEndpoints) == 0 || !addr.IsValid() || port == 0 {
 		return false
 	}
@@ -961,7 +961,7 @@ func isRetryableDialError(err error) bool {
 		strings.Contains(s, "GOAWAY")
 }
 
-func (d *tamizdatProxyDialer) DialUDP(metadata *M.Metadata) (net.PacketConn, error) {
+func (d *samizdatProxyDialer) DialUDP(metadata *M.Metadata) (net.PacketConn, error) {
 	if metadata == nil {
 		return nil, errors.New("nil metadata")
 	}

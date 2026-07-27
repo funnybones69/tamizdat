@@ -117,7 +117,7 @@ func (c *Child) Start() error {
 	if len(c.cfg.BypassRoutes) > 0 {
 		args = append(args, "-bypass-routes", strings.Join(c.cfg.BypassRoutes, ","))
 	}
-	c.logf("connect: starting TUN engine server=%s transport=%s profile=%s", c.cfg.Server, c.cfg.Transport, shortProfileHash(c.cfg))
+	c.logf("spawn %s %v", c.tunExe, args)
 
 	cmd := exec.CommandContext(ctx, c.tunExe, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -249,11 +249,8 @@ func (c *Child) pump(r io.Reader, tag string) {
 	sc.Buffer(make([]byte, 0, 4096), 1<<20)
 	for sc.Scan() {
 		line := sc.Text()
-		ready := onReadyHit(line)
-		if ready || shouldLogTunLine(line) {
-			c.logf("[%s] %s", tag, sanitizeLogLine(line))
-		}
-		if ready {
+		c.logf("[%s] %s", tag, line)
+		if onReadyHit(line) {
 			c.mu.Lock()
 			already := c.readyHit
 			c.readyHit = true
@@ -263,20 +260,6 @@ func (c *Child) pump(r io.Reader, tag string) {
 			}
 		}
 	}
-	if err := sc.Err(); err != nil {
-		c.logf("[%s] read error: %v", tag, err)
-	}
-}
-
-func shortProfileHash(cfg *Config) string {
-	key := profileStateKey(cfg)
-	if len(key) > 12 {
-		return key[:12]
-	}
-	if key == "" {
-		return "unknown"
-	}
-	return key
 }
 
 // onReadyHit matches the TUN engine's "I'm fully up" log lines. The

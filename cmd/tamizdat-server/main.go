@@ -14,7 +14,7 @@
 // inbound_fingerprint, and inbound_jitter_ms.
 //
 // Bootstrap: an empty users table on first start is migrated from the legacy
-// /etc/tamizdat/shortid.hex file into a single user "default".
+// /etc/tamizdat/shortid.hex file into a single user "anarki".
 package main
 
 import (

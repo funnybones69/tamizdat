@@ -114,10 +114,10 @@ var defaultSettings = map[string]string{
 	"inbound_cert_path":         "/etc/tamizdat/cert.pem",
 	"inbound_key_path":          "/etc/tamizdat/key.pem",
 	"inbound_priv_key":          "",
-	"inbound_masquerade_domain": "cover.example.com",
-	"inbound_masquerade_pool":   "cover.example.com=cover.example.com:443,ok.ru=ok.ru:443,vk.com=vk.com:443,mail.ru=mail.ru:443,yandex.ru=yandex.ru:443",
+	"inbound_masquerade_domain": "storage.yandexcloud.net",
+	"inbound_masquerade_pool":   "storage.yandexcloud.net=storage.yandexcloud.net:443,ok.ru=ok.ru:443,vk.com=vk.com:443,mail.ru=mail.ru:443,yandex.ru=yandex.ru:443",
 	"inbound_fingerprint":       "mix",
-	// inbound_proxy_protocol defaults OFF: existing prod (example-outbound) runs raw
+	// inbound_proxy_protocol defaults OFF: existing prod (odikee) runs raw
 	// tamizdat-server with no fronting nginx, so a default of "1" combined
 	// with trust-list "127.0.0.1/32" would silently reject all real clients
 	// during schema upgrade. Fronting deployments (ru2 / nginx -> tamizdat
@@ -781,7 +781,7 @@ func LoadSettings(db *sql.DB) (map[string]string, error) {
 }
 
 // BootstrapLegacyShortID converts the pre-Phase-2 single-shortid file
-// (/etc/tamizdat/shortid.hex) into one default user "default" if the users
+// (/etc/tamizdat/shortid.hex) into one default user "anarki" if the users
 // table is empty. Idempotent: re-runs are no-ops once any user exists.
 func BootstrapLegacyShortID(db *sql.DB, path string) (bool, error) {
 	if path == "" {
@@ -814,7 +814,7 @@ func BootstrapLegacyShortID(db *sql.DB, path string) (bool, error) {
 	}
 	now := time.Now().Unix()
 	_, err = db.Exec(`INSERT INTO users(id, name, master_shortid, outbound_tag, created_at, updated_at)
-        VALUES(?, 'default', ?, 'direct', ?, ?)`, id, master, now, now)
+        VALUES(?, 'anarki', ?, 'direct', ?, ?)`, id, master, now, now)
 	if err != nil {
 		return false, err
 	}

@@ -220,8 +220,8 @@ func (t *userTun) Close() error {
 		}
 		t.closeNotify = nil
 		// NOTE: stk.Destroy() was here briefly (PR #3) but is suspected
-		// of being the cause of the slow-shutdown
-		// issue during integration testing. gvisor's Destroy can take many
+		// of being the cause of the 2026-05-24 SSH-banner-timeout
+		// incident on the test box. gvisor's Destroy can take many
 		// seconds and run heavy global cleanup that interferes with
 		// other goroutines on the same runtime. Leaking the stack on
 		// shutdown is annoying but not fatal (whole process exits a

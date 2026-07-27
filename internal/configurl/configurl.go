@@ -36,8 +36,8 @@ type Config struct {
 //	tamizdat://<host>:<port>/?sni=<hostname>&pubkey=<64hex>&shortid=<16hex>&fp=chrome   (legacy v2, full; optional min_transports/max_transports)
 //	tamizdat://<host>:<port>/?pubkey=<64hex>&shortid=<16hex>                            (server-pushes-pool, clean)
 //	tamizdat://<host>:<port>/?pubkey=<64hex>&shortid=<16hex>&bootstrap=<sni>           (server-pushes-pool, explicit bootstrap)
-//	tamizdat://<shortid>@<host>:<port>?sni=<hostname>&pbk=<64hex>&fp=chrome             (legacy tamizdat form)
-//	tamizdat://<shortid>@<host>:<port>?sni=<hostname>&pbk=<64hex>&fp=chrome             (tamizdat scheme alias)
+//	tamizdat://<shortid>@<host>:<port>?sni=<hostname>&pbk=<64hex>&fp=chrome             (legacy samizdat form)
+//	samizdat://<shortid>@<host>:<port>?sni=<hostname>&pbk=<64hex>&fp=chrome             (samizdat scheme alias)
 //
 // Aliases: "pbk" == "pubkey", "sid" == "shortid", userinfo == "shortid".
 //
@@ -58,8 +58,8 @@ func Parse(raw string) (Config, error) {
 	if err != nil {
 		return cfg, fmt.Errorf("parse config URL: %w", err)
 	}
-	if u.Scheme != "tamizdat" {
-		return cfg, fmt.Errorf("unsupported config URL scheme %q (want tamizdat://)", u.Scheme)
+	if u.Scheme != "tamizdat" && u.Scheme != "samizdat" {
+		return cfg, fmt.Errorf("unsupported config URL scheme %q (want tamizdat:// or samizdat://)", u.Scheme)
 	}
 	if u.Host == "" {
 		return cfg, fmt.Errorf("config URL must include server host:port")
@@ -100,7 +100,7 @@ func Parse(raw string) (Config, error) {
 	}
 	cfg.ServerName = cfg.ServerNames[0] // legacy field
 
-	// Accept "pubkey" (canonical tamizdat) or "pbk" (legacy tamizdat) — both mean the same.
+	// Accept "pubkey" (canonical tamizdat) or "pbk" (legacy samizdat) — both mean the same.
 	pubRaw := q.Get("pubkey")
 	if strings.TrimSpace(pubRaw) == "" {
 		pubRaw = q.Get("pbk")
@@ -112,7 +112,7 @@ func Parse(raw string) (Config, error) {
 	cfg.PublicKey = pub
 
 	// Accept shortid from "?shortid=" (canonical), "?sid=" (alias),
-	// or from URL userinfo (legacy tamizdat form: tamizdat://SHORTID@host:port?...).
+	// or from URL userinfo (legacy samizdat form: tamizdat://SHORTID@host:port?...).
 	shortIDStr := strings.TrimSpace(q.Get("shortid"))
 	if shortIDStr == "" {
 		shortIDStr = strings.TrimSpace(q.Get("sid"))

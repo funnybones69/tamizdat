@@ -44,7 +44,9 @@ func (s *Server) handleConn(ctx context.Context, clientConn net.Conn) {
 	atomic.AddInt32(&s.activeConns, 1)
 	defer atomic.AddInt32(&s.activeConns, -1)
 
-	buf := make([]byte, 1600)
+	// The first datagram may be a bounded Bond-v2 BIND JSON frame. Legacy
+	// GETCONF/raw packets retain their old parsing and proxy path below.
+	buf := make([]byte, bondHeaderSize+bondMaxBindPayload)
 	clientConn.SetReadDeadline(time.Now().Add(handshakeTimeout))
 	n, err := clientConn.Read(buf)
 	if err != nil {
@@ -53,6 +55,15 @@ func (s *Server) handleConn(ctx context.Context, clientConn net.Conn) {
 	clientConn.SetReadDeadline(time.Time{})
 
 	firstPacket := buf[:n]
+	if isBondPacket(firstPacket) {
+		s.handleBondConn(ctx, clientConn, firstPacket)
+		return
+	}
+	// Before Bond v2 this read buffer was exactly 1600 bytes. Preserve the
+	// legacy truncation boundary for an oversized raw datagram.
+	if len(firstPacket) > 1600 {
+		firstPacket = firstPacket[:1600]
+	}
 	firstStr := string(firstPacket)
 
 	// --- GETCONF protocol ---

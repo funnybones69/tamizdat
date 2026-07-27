@@ -1,5 +1,5 @@
-// Command tamizdat-tun-windows exposes a Windows Wintun TUN interface and
-// forwards IPv4 TCP flows through the existing Tamizdat Client API.
+// Command samizdat-tun-windows exposes a Windows Wintun TUN interface and
+// forwards IPv4 TCP flows through the existing Samizdat Client API.
 package main
 
 import (
@@ -24,7 +24,7 @@ import (
 	"github.com/funnybones69/tamizdat/internal/transport/fragpoc"
 	"github.com/funnybones69/tamizdat/internal/tunengine"
 	"github.com/funnybones69/tamizdat/node"
-	tamizdat "github.com/funnybones69/tamizdat/pkg/tamizdat"
+	"github.com/funnybones69/tamizdat/pkg/tamizdat"
 )
 
 func main() {
@@ -32,7 +32,7 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("tamizdat-tun-windows", flag.ContinueOnError)
+	fs := flag.NewFlagSet("samizdat-tun-windows", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
 	configURL := fs.String("config", "", "tamizdat:// URL with server, sni, pubkey, shortid and fp")
@@ -41,10 +41,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fragPoCDownWindow := fs.Int("fragpoc-down-window", 0, "FragPoC concurrent DOWN polls per logical stream. 0 = legacy window 1; experimental.")
 	fragPoCSecure := fs.Bool("fragpoc-secure", false, "Enable FragPoC secure-v1 AEAD framing")
 	fragPoCUDPPolicy := fs.String("fragpoc-udp-policy", "", "FragPoC UDP policy: dns-only, all, or off. Empty defaults to dns-only in fragpoc mode.")
-	tunName := fs.String("tun-name", "Tamizdat", "Windows TUN interface name")
+	tunName := fs.String("tun-name", "Samizdat", "Windows TUN interface name")
 	mtu := fs.Int("mtu", 1500, "TUN MTU")
 	debug := fs.Bool("debug", false, "Enable verbose flow logs")
-	tcpFrag := fs.Bool("tcpfrag", true, "Enable Tamizdat TCP ClientHello fragmentation")
+	tcpFrag := fs.Bool("tcpfrag", true, "Enable Samizdat TCP ClientHello fragmentation")
 	debugListen := fs.String("debug-listen", "", "Listen addr (e.g. 127.0.0.1:16062) for /debug/vars expvar HTTP. Empty = off.")
 	tcpModerateReceiveBuffer := fs.Bool("tcp-moderate-receive-buffer", true, "Enable gVisor TCP receive-buffer auto-tuning")
 	tcpSendBufferSize := fs.Int("tcp-send-buffer-size", 0, "Optional gVisor TCP send buffer size in bytes (0 = default)")
@@ -60,8 +60,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	dialRecoveryBackoff := fs.Duration("dial-recovery-backoff", 0, "Global pause after --dial-recovery-threshold failures. 0 = transport default, negative disables.")
 	tunIP := fs.String("tun-ip", "10.255.0.2", "IPv4 address to assign to the TUN interface")
 	tunPrefix := fs.Int("tun-prefix", 24, "IPv4 prefix length for the TUN interface")
-	autoRoute := fs.Bool("auto-route", true, "Automatically configure host-route to server + RFC1918 LAN bypass + default-route via TUN; cleaned up on exit")
-	selectiveRoutes := fs.String("selective-routes", "", "Comma-separated host names or IPv4 literals. When set: TUN comes up but default route is NOT installed; instead /32 host-routes for each resolved IP point into the TUN. Use this to route only specific test sites through tamizdat alongside an existing default-route owner (e.g. another VPN).")
+	autoRoute := fs.Bool("auto-route", true, "Automatically configure host-route to server + default-route via TUN; cleaned up on exit")
+	selectiveRoutes := fs.String("selective-routes", "", "Comma-separated host names or IPv4 literals. When set: TUN comes up but default route is NOT installed; instead /32 host-routes for each resolved IP point into the TUN. Use this to route only specific test sites through samizdat alongside an existing default-route owner (e.g. another VPN).")
 	bypassRoutes := fs.String("bypass-routes", "", "Comma-separated host names or IPv4 literals that MUST go through the physical gateway (bypass the tunnel). Default route still goes via TUN. Use this for AI provider APIs / control plane that must remain reachable when the tunnel is congested or geo-blocked from the exit point.")
 	selectiveRefresh := fs.Duration("selective-refresh", 5*time.Minute, "How often to re-resolve --selective-routes / --bypass-routes hostnames and update host-routes. 0 = disable.")
 	routingConfig := fs.String("routing-config", "", "Path to JSON node config (xray-style inbounds/outbounds/rules). When set, the TUN routes flows via the node Dispatcher (geoip:telegram, geosite:openai, IncludeFile, etc. are honoured). Empty = legacy mode: all TUN flows go through the single tamizdat client built from --config.")
@@ -178,7 +178,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	defer proxyClient.Close()
 
-	// Publish RTT probe stats for the Windows tray/status UI.
+	// Publish RTT probe stats for the Windows GUI lamp.
 	expvar.Publish("tamizdat_rtt_probe", expvar.Func(func() interface{} {
 		if h2Client != nil {
 			return h2Client.RTTProbeSnapshot()
@@ -371,7 +371,7 @@ func protectedServerEndpoints(ctx context.Context, serverAddr string) []netip.Ad
 }
 
 func printRouteHelp(w io.Writer, tunName, rawConfig string) {
-	server := "<tamizdat-server-ip>"
+	server := "<samizdat-server-ip>"
 	if cfg, err := configurl.Parse(rawConfig); err == nil {
 		if host, _, splitErr := net.SplitHostPort(cfg.ServerAddr); splitErr == nil {
 			server = host
@@ -381,7 +381,7 @@ func printRouteHelp(w io.Writer, tunName, rawConfig string) {
 	fmt.Fprintf(w, `Manual Windows routing notes (run PowerShell as Administrator; this program never changes routes automatically):
 
 1. Start the client first:
-   .\tamizdat-tun-windows.exe --config "tamizdat://..."
+   .\samizdat-tun-windows.exe --config "tamizdat://..."
 
 2. Find the TUN interface index:
    Get-NetIPInterface -InterfaceAlias %q
@@ -389,7 +389,7 @@ func printRouteHelp(w io.Writer, tunName, rawConfig string) {
 3. Assign an IPv4 address to the TUN if Windows did not assign one:
    New-NetIPAddress -InterfaceAlias %q -IPAddress 10.255.0.2 -PrefixLength 24
 
-4. Add a host route for the Tamizdat server (%s) via your normal physical gateway BEFORE default-routing traffic into the TUN. This prevents Tamizdat outer dials from recursively entering the TUN.
+4. Add a host route for the Samizdat server (%s) via your normal physical gateway BEFORE default-routing traffic into the TUN. This prevents Samizdat outer dials from recursively entering the TUN.
 
 5. Add the default IPv4 route only when ready to test:
    New-NetRoute -DestinationPrefix "0.0.0.0/0" -InterfaceAlias %q -NextHop "0.0.0.0" -RouteMetric 1
@@ -397,6 +397,6 @@ func printRouteHelp(w io.Writer, tunName, rawConfig string) {
 6. Remove test route when done:
    Remove-NetRoute -DestinationPrefix "0.0.0.0/0" -InterfaceAlias %q -Confirm:$false
 
-UDP is intentionally not relayed by Tamizdat v1; UDP flows are dropped so applications can retry over TCP.
+UDP is intentionally not relayed by Samizdat v1; UDP flows are dropped so applications can retry over TCP.
 `, tunName, tunName, server, tunName, tunName)
 }
