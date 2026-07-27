@@ -20,7 +20,10 @@ const (
 	BalancerModeAlive      = "alive"
 
 	balancerAliveFailureCooldown = 30 * time.Second
-	balancerMemberAttemptTimeout = 3 * time.Second
+	// Match the production outbound client's cold-connect budget. A shorter
+	// deadline can incorrectly quarantine a healthy member while it establishes
+	// its first TCP+TLS+H2 transport after startup or a network change.
+	balancerMemberAttemptTimeout = 10 * time.Second
 )
 
 // BalancerConfig is stored in the outbounds.uri column for kind="balancer".
