@@ -42,6 +42,16 @@ CREATE TABLE IF NOT EXISTS users (
     id                   TEXT PRIMARY KEY,
     name                 TEXT NOT NULL,
     master_shortid       TEXT NOT NULL UNIQUE,
+    user_kind            TEXT NOT NULL DEFAULT 'remote',
+    local_enabled        INTEGER NOT NULL DEFAULT 0,
+    local_iface          TEXT,
+    local_tun_name       TEXT NOT NULL DEFAULT 'taml0',
+    local_tun_addr       TEXT NOT NULL DEFAULT '198.18.0.1/24',
+    local_tun_mtu        INTEGER NOT NULL DEFAULT 1280,
+    local_auto_route     INTEGER NOT NULL DEFAULT 1,
+    local_bypass_private INTEGER NOT NULL DEFAULT 1,
+    local_block_quic     INTEGER NOT NULL DEFAULT 1,
+    local_sniff          INTEGER NOT NULL DEFAULT 1,
     epoch_key            TEXT,                         -- DEPRECATED post-2026-05-09 shortid full-B simplification; kept nullable for backward-compat with existing DB rows.
     pool_size            INTEGER,                      -- DEPRECATED: same vintage as epoch_key.
     outbound_tag         TEXT NOT NULL DEFAULT 'direct',
@@ -255,6 +265,13 @@ func EnsureSchema(db *sql.DB) error {
 	if err := migrateUserSessionsV11(ctx, conn); err != nil {
 		return err
 	}
+	// Migration v11 -> v12 (local router/TUN users). Existing rows remain
+	// remote and disabled, so upgrading cannot alter routing until an
+	// operator explicitly creates a local_tun user in Panel.
+	if err := migrateUsersV12(ctx, conn); err != nil {
+		return err
+	}
+
 	now := time.Now().Unix()
 	if _, err := conn.ExecContext(ctx, `INSERT OR IGNORE INTO outbounds(tag, kind, uri, note, created_at, updated_at) VALUES('direct', 'direct', NULL, 'Direct dial from server IP', ?, ?)`, now, now); err != nil {
 		return err
@@ -264,7 +281,7 @@ func EnsureSchema(db *sql.DB) error {
 			return err
 		}
 	}
-	if _, err := conn.ExecContext(ctx, `INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', '11')`); err != nil {
+	if _, err := conn.ExecContext(ctx, `INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', '12')`); err != nil {
 		return err
 	}
 	if _, err := conn.ExecContext(ctx, `DELETE FROM settings WHERE key='schema_version'`); err != nil {
@@ -743,6 +760,59 @@ func migrateUserSessionsV11(ctx context.Context, conn interface {
 	return nil
 }
 
+// migrateUsersV12 adds the local router/TUN user fields. Each ALTER is
+// independently PRAGMA-probed so Panel and server may race safely at boot.
+func migrateUsersV12(ctx context.Context, conn interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}) error {
+	rows, err := conn.QueryContext(ctx, `PRAGMA table_info(users)`)
+	if err != nil {
+		return err
+	}
+	cols := make(map[string]struct{})
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notNull, pk int
+		var dfltValue sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dfltValue, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		cols[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	add := []struct {
+		name string
+		sql  string
+	}{
+		{"user_kind", `ALTER TABLE users ADD COLUMN user_kind TEXT NOT NULL DEFAULT 'remote'`},
+		{"local_enabled", `ALTER TABLE users ADD COLUMN local_enabled INTEGER NOT NULL DEFAULT 0`},
+		{"local_iface", `ALTER TABLE users ADD COLUMN local_iface TEXT`},
+		{"local_tun_name", `ALTER TABLE users ADD COLUMN local_tun_name TEXT NOT NULL DEFAULT 'taml0'`},
+		{"local_tun_addr", `ALTER TABLE users ADD COLUMN local_tun_addr TEXT NOT NULL DEFAULT '198.18.0.1/24'`},
+		{"local_tun_mtu", `ALTER TABLE users ADD COLUMN local_tun_mtu INTEGER NOT NULL DEFAULT 1280`},
+		{"local_auto_route", `ALTER TABLE users ADD COLUMN local_auto_route INTEGER NOT NULL DEFAULT 1`},
+		{"local_bypass_private", `ALTER TABLE users ADD COLUMN local_bypass_private INTEGER NOT NULL DEFAULT 1`},
+		{"local_block_quic", `ALTER TABLE users ADD COLUMN local_block_quic INTEGER NOT NULL DEFAULT 1`},
+		{"local_sniff", `ALTER TABLE users ADD COLUMN local_sniff INTEGER NOT NULL DEFAULT 1`},
+	}
+	for _, col := range add {
+		if _, ok := cols[col.name]; ok {
+			continue
+		}
+		if _, err := conn.ExecContext(ctx, col.sql); err != nil {
+			return fmt.Errorf("add users.%s: %w", col.name, err)
+		}
+	}
+	return nil
+}
 func GetSetting(db *sql.DB, key, def string) string {
 	var value string
 	if db == nil {

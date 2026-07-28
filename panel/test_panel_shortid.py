@@ -49,7 +49,7 @@ class PanelShortidTests(unittest.TestCase):
         self.assertEqual(len(row["master_shortid"]), 16)
 
     def test_add_user_uses_server_default_pool_size(self):
-        u"""Server-side default must control new users when the panel body
+        """Server-side default must control new users when the panel body
         omits pool_size."""
         prev_default = None
         with self.panel.db_conn() as con:

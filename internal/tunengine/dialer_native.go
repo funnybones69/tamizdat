@@ -123,6 +123,7 @@ type samizdatProxyDialer struct {
 	dropPrivateDestinations bool
 	dropAllUDP              bool
 	dropNonDNSUDP           bool
+	dropQUIC                bool
 	blockedEndpoints        map[netip.AddrPort]struct{}
 	// silent UDP counters: log a summary once per logEvery interval instead of per-flow spam
 	udpDropped      atomic.Uint64
@@ -561,6 +562,9 @@ func (d *samizdatProxyDialer) dialTCP(ctx context.Context, metadata *M.Metadata,
 	if d.client == nil {
 		return nil, errors.New("nil tamizdat client")
 	}
+	if requestClient, ok := d.client.(RequestProxyClient); ok {
+		return requestClient.DialRequest(ctx, requestFromMetadata(metadata))
+	}
 	return d.client.DialContext(ctx, "tcp", dest)
 }
 
@@ -907,8 +911,12 @@ func (d *samizdatProxyDialer) isBlockedEndpoint(addr netip.Addr, port uint16) bo
 }
 
 func requestFromMetadata(metadata *M.Metadata) *node.Request {
+	network := node.NetworkTCP
+	if metadata.Network == M.UDP {
+		network = node.NetworkUDP
+	}
 	return &node.Request{
-		Network:    node.NetworkTCP,
+		Network:    network,
 		TargetHost: metadata.DstIP.String(),
 		TargetPort: int(metadata.DstPort),
 		SourceIP:   netIPFromAddr(metadata.SrcIP),
@@ -987,17 +995,17 @@ func (d *samizdatProxyDialer) DialUDP(metadata *M.Metadata) (net.PacketConn, err
 		}
 		return nil, errPrivateDestination
 	}
-	if d.dropAllUDP {
+	if d.dropAllUDP || (d.dropNonDNSUDP && metadata.DstPort != 53) {
 		d.udpDropped.Add(1)
 		if d.debug {
 			log.Printf("[udp policy drop] %s -> %s", metadata.SourceAddress(), metadata.DestinationAddress())
 		}
 		return nil, errNonDNSUDP
 	}
-	if d.dropNonDNSUDP && metadata.DstPort != 53 {
+	if d.dropQUIC && metadata.DstPort == 443 {
 		d.udpDropped.Add(1)
 		if d.debug {
-			log.Printf("[udp policy drop] %s -> %s", metadata.SourceAddress(), metadata.DestinationAddress())
+			log.Printf("[quic policy drop] %s -> %s", metadata.SourceAddress(), metadata.DestinationAddress())
 		}
 		return nil, errNonDNSUDP
 	}
@@ -1031,7 +1039,7 @@ func (d *samizdatProxyDialer) DialUDP(metadata *M.Metadata) (net.PacketConn, err
 	)
 	for attempt := 0; attempt < 4; attempt++ {
 		dialCtx, cancel := context.WithTimeout(context.Background(), d.dialAttemptTimeout)
-		pc, err = d.client.DialUDP(dialCtx, dest)
+		pc, err = d.dialUDP(dialCtx, metadata, dest)
 		cancel()
 		if err == nil {
 			if d.debug {
@@ -1052,4 +1060,19 @@ func (d *samizdatProxyDialer) DialUDP(metadata *M.Metadata) (net.PacketConn, err
 	log.Printf("[UDP-EXHAUSTED] %s -> %s 4 attempts in %dms: %v", src, dest, time.Since(startedAt).Milliseconds(), err)
 	d.udpDropped.Add(1)
 	return nil, fmt.Errorf("%w: %s", errUDPDialFailed, err.Error())
+}
+
+func (d *samizdatProxyDialer) dialUDP(ctx context.Context, metadata *M.Metadata, dest string) (net.PacketConn, error) {
+	req := requestFromMetadata(metadata)
+	if d.dispatcher != nil {
+		pc, _, err := d.dispatcher.DispatchPacket(ctx, req)
+		return pc, err
+	}
+	if d.client == nil {
+		return nil, errors.New("nil tamizdat client")
+	}
+	if requestClient, ok := d.client.(RequestProxyClient); ok {
+		return requestClient.DialPacketRequest(ctx, req)
+	}
+	return d.client.DialUDP(ctx, dest)
 }

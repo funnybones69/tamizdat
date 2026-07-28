@@ -37,7 +37,16 @@ type Options struct {
 	DropPrivateDestinations  bool
 	DropAllUDP               bool
 	DropNonDNSUDP            bool
+	DropQUIC                 bool
 	BlockedEndpoints         []netip.AddrPort
 	Dispatcher               *node.Dispatcher
 	PostTunUp                func() error // optional callback fired once TUN device + stack are open
+}
+
+// RequestProxyClient is an optional extension used by local inbounds. It
+// preserves the original LAN source address and inbound/user metadata for
+// source-, inbound- and user-scoped routing rules.
+type RequestProxyClient interface {
+	DialRequest(ctx context.Context, req *node.Request) (net.Conn, error)
+	DialPacketRequest(ctx context.Context, req *node.Request) (net.PacketConn, error)
 }

@@ -61,6 +61,32 @@ Tamizdat is not a hosted anonymity network and does not magically make unsafe en
 - Optional routing rules based on domain/IP/geosite/geoip data.
 - S-UI-style Linux release installer with a `tamizdat` management command.
 
+## Panel-managed local TUN / LAN user
+
+On Linux/OpenWrt, the server can also act as a transparent client for devices
+behind one selected LAN interface. In **Users**, create a user of type
+**Local TUN / LAN**, select the kernel interface (for example `br-lan`), and
+enable it after the routing rules and outbounds are ready.
+
+The local user is not a remotely authenticating profile and has no client URI.
+Its TCP and UDP flows use the same panel-managed routing rules, geodata and
+outbound chains as normal server traffic. User-scoped rules match the local
+user's panel name; source-IP and `local-tun` inbound matches remain available.
+TLS SNI / HTTP Host sniffing allows domain rules to work after a LAN client has
+already resolved a site to an IP. Optional UDP/443 blocking forces web clients
+off QUIC so those domain rules remain deterministic; other UDP is forwarded.
+
+Automatic routing installs an IPv4 policy rule and a dedicated nftables table
+for forwarded TCP/UDP arriving on the selected interface. Router-origin traffic
+is deliberately not marked, preventing the server's own H2 connection from
+looping back into the TUN. Private destinations can stay direct. Cleanup removes
+the nft mark before the policy route (fail open), and restarts never overlap an
+older cleanup generation.
+
+Requirements: Linux, `/dev/net/tun`, `ip` from iproute2, nftables, and sufficient
+privileges to create a TUN and policy routes. The first version supports one
+local TUN user per server and is disabled by default on creation.
+
 ## Repository layout
 
 ```text

@@ -63,6 +63,7 @@ func (e *Engine) Start(ctx context.Context, opts Options, client ProxyClient) (*
 		return nil, err
 	}
 	dialer := newSamizdatProxyDialer(client, opts.Debug, opts.Dispatcher, opts.DialAttemptTimeout, opts.DialConcurrency, opts.DialActiveConcurrency, opts.DialOpenInterval, opts.DialTargetCooldown, opts.DialTargetCooldownMax, opts.DialMinAttemptBudget, opts.DialRecoveryThreshold, opts.DialRecoveryBackoff, opts.DropPrivateDestinations, opts.DropAllUDP, opts.DropNonDNSUDP, opts.BlockedEndpoints)
+	dialer.dropQUIC = opts.DropQUIC
 	handler := tunnel.New(dialer, statistic.DefaultManager)
 	handler.ProcessAsync()
 

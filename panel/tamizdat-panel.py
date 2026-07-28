@@ -2,6 +2,7 @@
 """Tamizdat Panel — SQLite-backed admin auth and outbound chain management."""
 
 import json
+import ipaddress
 import os
 import sqlite3
 import subprocess
@@ -91,6 +92,16 @@ CREATE TABLE IF NOT EXISTS users (
     name                 TEXT NOT NULL,
     master_shortid       TEXT NOT NULL UNIQUE,
     epoch_key            TEXT,                         -- DEPRECATED post-2026-05-09 shortid full-B simplification; nullable.
+    user_kind            TEXT NOT NULL DEFAULT 'remote',
+    local_enabled        INTEGER NOT NULL DEFAULT 0,
+    local_iface          TEXT,
+    local_tun_name       TEXT NOT NULL DEFAULT 'taml0',
+    local_tun_addr       TEXT NOT NULL DEFAULT '198.18.0.1/24',
+    local_tun_mtu        INTEGER NOT NULL DEFAULT 1280,
+    local_auto_route     INTEGER NOT NULL DEFAULT 1,
+    local_bypass_private INTEGER NOT NULL DEFAULT 1,
+    local_block_quic     INTEGER NOT NULL DEFAULT 1,
+    local_sniff          INTEGER NOT NULL DEFAULT 1,
     pool_size            INTEGER,                      -- DEPRECATED: same vintage as epoch_key.
     outbound_tag         TEXT NOT NULL DEFAULT 'direct',
     bytes_up             INTEGER NOT NULL DEFAULT 0,
@@ -457,6 +468,18 @@ def _user_row_to_dict(row, online_count=0, _current_pool_index=-1, active_transp
     return {
         "id": row["id"],
         "name": row["name"],
+        "user_kind": (row["user_kind"] if "user_kind" in row.keys() else "remote") or "remote",
+        "local_enabled": bool(row["local_enabled"]) if "local_enabled" in row.keys() else False,
+        "local_iface": (row["local_iface"] or "") if "local_iface" in row.keys() else "",
+        "local_tun_name": (row["local_tun_name"] or "taml0") if "local_tun_name" in row.keys() else "taml0",
+        "local_tun_addr": (row["local_tun_addr"] or "198.18.0.1/24") if "local_tun_addr" in row.keys() else "198.18.0.1/24",
+        "local_tun_mtu": (row["local_tun_mtu"] if "local_tun_mtu" in row.keys() else 1280) or 1280,
+        "local_auto_route": bool(row["local_auto_route"]) if "local_auto_route" in row.keys() else True,
+        "local_bypass_private": bool(row["local_bypass_private"]) if "local_bypass_private" in row.keys() else True,
+        "local_block_quic": bool(row["local_block_quic"]) if "local_block_quic" in row.keys() else True,
+        "local_sniff": bool(row["local_sniff"]) if "local_sniff" in row.keys() else True,
+        "local_state": "disabled" if not (bool(row["local_enabled"]) if "local_enabled" in row.keys() else False) else "starting",
+        "local_error": "",
         "outbound_tag": row["outbound_tag"],
         "pool_size": (row["pool_size"] if "pool_size" in row.keys() else 1) or 1,
         "expires_at": row["expires_at"],
@@ -536,6 +559,18 @@ def _live_users_from_expvar():
                     "h2_relay_live_udp_streams": _intish(item.get("h2_relay_live_udp_streams")),
                     "active_transport": str(item.get("active_transport") or ""),
                 }
+        local_tun = payload.get("tamizdat_local_tun") if isinstance(payload, dict) else None
+        if isinstance(local_tun, dict):
+            uid = str(local_tun.get("user_id") or "")
+            if uid:
+                item = live.setdefault(uid, {})
+                item.update({
+                    "local_state": str(local_tun.get("state") or "disabled"),
+                    "local_error": str(local_tun.get("error") or ""),
+                    "local_iface": str(local_tun.get("interface") or ""),
+                    "local_tun_name": str(local_tun.get("tun_name") or "taml0"),
+                    "local_started_at": _intish(local_tun.get("started_at")),
+                })
     except Exception:
         live = {}
 
@@ -651,41 +686,108 @@ def get_user(user_id):
     return _user_row_to_dict(row, n, p, active_transport)
 
 
+_LOCAL_IFACE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,15}$")
+
+
+def _as_bool(value, default=False):
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off", ""):
+        return False
+    raise ValueError(f"invalid boolean value {value!r}")
+
+
+def _local_tun_values(body, current=None):
+    current = dict(current or {})
+
+    def pick(name, default):
+        return body.get(name) if name in body else current.get(name, default)
+
+    enabled = _as_bool(pick("local_enabled", False))
+    iface = str(pick("local_iface", "") or "").strip()
+    tun_name = str(pick("local_tun_name", "taml0") or "taml0").strip()
+    tun_addr = str(pick("local_tun_addr", "198.18.0.1/24") or "198.18.0.1/24").strip()
+    try:
+        mtu = int(pick("local_tun_mtu", 1280) or 1280)
+    except Exception:
+        raise ValueError("local_tun_mtu must be an integer")
+    auto_route = _as_bool(pick("local_auto_route", True), True)
+    bypass_private = _as_bool(pick("local_bypass_private", True), True)
+    block_quic = _as_bool(pick("local_block_quic", True), True)
+    sniff_enabled = _as_bool(pick("local_sniff", True), True)
+
+    if iface and not _LOCAL_IFACE_RE.fullmatch(iface):
+        raise ValueError("local_iface must be a Linux interface name")
+    if enabled and auto_route and not iface:
+        raise ValueError("local_iface is required when automatic routing is enabled")
+    if not _LOCAL_IFACE_RE.fullmatch(tun_name):
+        raise ValueError("local_tun_name must be a Linux interface name")
+    if iface and iface == tun_name:
+        raise ValueError("local_iface must differ from local_tun_name")
+    try:
+        parsed = ipaddress.ip_interface(tun_addr)
+    except ValueError:
+        raise ValueError("local_tun_addr must be an IPv4 CIDR")
+    if parsed.version != 4:
+        raise ValueError("local_tun_addr must be an IPv4 CIDR")
+    if mtu < 576 or mtu > 9000:
+        raise ValueError("local_tun_mtu must be in range 576..9000")
+    return {
+        "local_enabled": int(enabled), "local_iface": iface or None,
+        "local_tun_name": tun_name, "local_tun_addr": str(parsed), "local_tun_mtu": mtu,
+        "local_auto_route": int(auto_route), "local_bypass_private": int(bypass_private),
+        "local_block_quic": int(block_quic), "local_sniff": int(sniff_enabled),
+    }
+
+
 def create_user(body):
     name = (body.get("name") or "").strip()
     if not name:
         raise ValueError("name is required")
-    pool_size = body.get("pool_size")
-    if pool_size is not None and pool_size != "":
-        try:
-            pool_size = int(pool_size)
-        except Exception:
-            raise ValueError("pool_size must be int")
-        if pool_size <= 0 or pool_size > 4:
-            raise ValueError("pool_size out of range [1,4]")
+    kind = str(body.get("user_kind") or "remote").strip().lower()
+    if kind not in ("remote", "local_tun"):
+        raise ValueError("user_kind must be remote or local_tun")
+
     outbound = (body.get("outbound_tag") or "direct").strip() or "direct"
-    expires_at = body.get("expires_at")
-    if expires_at in (None, "", 0, "0"):
-        expires_at = None
+    local = _local_tun_values(body if kind == "local_tun" else {})
+    if kind == "local_tun":
+        remote_keys = {"pool_size", "expires_at", "bandwidth_cap", "rate_limit_mbps", "notification_text", "turn_room_link"}
+        if any(key in body for key in remote_keys):
+            raise ValueError("remote profile fields are not valid for a local_tun user")
+        pool_size, expires_at, bandwidth_cap, rate_limit_mbps = 1, None, None, None
     else:
-        expires_at = int(expires_at)
-    bandwidth_cap = body.get("bandwidth_cap")
-    if bandwidth_cap in (None, "", 0, "0"):
-        bandwidth_cap = None
-    else:
-        bandwidth_cap = int(bandwidth_cap)
-    rate_limit_mbps = body.get("rate_limit_mbps")
-    if rate_limit_mbps in (None, "", 0, "0"):
-        rate_limit_mbps = None
-    else:
-        rate_limit_mbps = int(rate_limit_mbps)
+        if any(str(k).startswith("local_") for k in body):
+            raise ValueError("local TUN fields require user_kind=local_tun")
+        pool_size = body.get("pool_size")
+        if pool_size is not None and pool_size != "":
+            try:
+                pool_size = int(pool_size)
+            except Exception:
+                raise ValueError("pool_size must be int")
+            if pool_size <= 0 or pool_size > 4:
+                raise ValueError("pool_size out of range [1,4]")
+        expires_at = body.get("expires_at")
+        expires_at = None if expires_at in (None, "", 0, "0") else int(expires_at)
+        bandwidth_cap = body.get("bandwidth_cap")
+        bandwidth_cap = None if bandwidth_cap in (None, "", 0, "0") else int(bandwidth_cap)
+        rate_limit_mbps = body.get("rate_limit_mbps")
+        rate_limit_mbps = None if rate_limit_mbps in (None, "", 0, "0") else int(rate_limit_mbps)
 
     ensure_db()
     with db_conn() as con:
         row = con.execute("SELECT 1 FROM outbounds WHERE tag=?", (outbound,)).fetchone()
         if not row:
             raise ValueError(f"outbound_tag {outbound!r} does not exist")
-        if pool_size is None:
+        if kind == "local_tun" and con.execute("SELECT 1 FROM users WHERE user_kind='local_tun' LIMIT 1").fetchone():
+            raise ValueError("only one local TUN user is supported")
+        if kind == "remote" and pool_size is None:
             try:
                 pool_size = int(_setting(con, "pool_size_default", DEFAULT_SETTINGS["pool_size_default"]))
             except Exception:
@@ -695,11 +797,20 @@ def create_user(body):
         master = _new_unique_master_shortid(con)
         uid = secrets.token_hex(8)
         now = int(time.time())
-        # pool_size is now the exact H2 transport count per user. When the
-        # caller omits it, the server-side default is used and clamped to the
-        # supported 1..4 range.
-        con.execute("""INSERT INTO users(id, name, master_shortid, pool_size, outbound_tag, expires_at, bandwidth_cap, rate_limit_mbps, created_at, updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?)""", (uid, name, master, pool_size, outbound, expires_at, bandwidth_cap, rate_limit_mbps, now, now))
+        con.execute("""INSERT INTO users(
+            id, name, master_shortid, user_kind, pool_size, outbound_tag,
+            expires_at, bandwidth_cap, rate_limit_mbps,
+            local_enabled, local_iface, local_tun_name, local_tun_addr, local_tun_mtu,
+            local_auto_route, local_bypass_private, local_block_quic, local_sniff,
+            created_at, updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                uid, name, master, kind, pool_size, outbound,
+                expires_at, bandwidth_cap, rate_limit_mbps,
+                local["local_enabled"], local["local_iface"], local["local_tun_name"],
+                local["local_tun_addr"], local["local_tun_mtu"], local["local_auto_route"],
+                local["local_bypass_private"], local["local_block_quic"], local["local_sniff"],
+                now, now,
+            ))
     _sighup_server()
     return get_user(uid)
 
@@ -719,6 +830,35 @@ def update_user(user_id, body):
             if not con.execute("SELECT 1 FROM outbounds WHERE tag=?", (ob,)).fetchone():
                 raise ValueError(f"outbound_tag {ob!r} does not exist")
         fields.append("outbound_tag=?"); args.append(ob)
+    with db_conn() as con:
+        existing = con.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    if not existing:
+        raise ValueError("user not found")
+    kind = (existing["user_kind"] or "remote") if "user_kind" in existing.keys() else "remote"
+    requested_kind = str(body.get("user_kind") or kind).strip().lower()
+    if requested_kind != kind:
+        raise ValueError("user_kind cannot be changed after creation")
+    if kind == "local_tun":
+        remote_keys = {"pool_size", "expires_at", "bandwidth_cap", "rate_limit_mbps", "notification_text", "turn_room_link"}
+        if any(key in body for key in remote_keys):
+            raise ValueError("remote profile fields are not valid for a local_tun user")
+
+    local_keys = {
+        "local_enabled", "local_iface", "local_tun_name", "local_tun_addr", "local_tun_mtu",
+        "local_auto_route", "local_bypass_private", "local_block_quic", "local_sniff",
+    }
+    touched_local = any(key in body for key in local_keys)
+    if kind != "local_tun" and touched_local:
+        raise ValueError("local TUN fields require a local_tun user")
+    if kind == "local_tun" and touched_local:
+        local = _local_tun_values(body, existing)
+        for key in (
+            "local_enabled", "local_iface", "local_tun_name", "local_tun_addr", "local_tun_mtu",
+            "local_auto_route", "local_bypass_private", "local_block_quic", "local_sniff",
+        ):
+            fields.append(f"{key}=?")
+            args.append(local[key])
+
     if "pool_size" in body:
         ps = body.get("pool_size")
         if ps in (None, "", 0, "0"):
@@ -1556,6 +1696,26 @@ def _migrate_users_turn_profile(con):
             con.execute(sql)
 
 
+def _migrate_users_local_tun(con):
+    """v12: panel-managed local TUN/LAN users."""
+    cols = {r["name"] for r in con.execute("PRAGMA table_info(users)").fetchall()}
+    add = [
+        ("user_kind", "ALTER TABLE users ADD COLUMN user_kind TEXT NOT NULL DEFAULT 'remote'"),
+        ("local_enabled", "ALTER TABLE users ADD COLUMN local_enabled INTEGER NOT NULL DEFAULT 0"),
+        ("local_iface", "ALTER TABLE users ADD COLUMN local_iface TEXT"),
+        ("local_tun_name", "ALTER TABLE users ADD COLUMN local_tun_name TEXT NOT NULL DEFAULT 'taml0'"),
+        ("local_tun_addr", "ALTER TABLE users ADD COLUMN local_tun_addr TEXT NOT NULL DEFAULT '198.18.0.1/24'"),
+        ("local_tun_mtu", "ALTER TABLE users ADD COLUMN local_tun_mtu INTEGER NOT NULL DEFAULT 1280"),
+        ("local_auto_route", "ALTER TABLE users ADD COLUMN local_auto_route INTEGER NOT NULL DEFAULT 1"),
+        ("local_bypass_private", "ALTER TABLE users ADD COLUMN local_bypass_private INTEGER NOT NULL DEFAULT 1"),
+        ("local_block_quic", "ALTER TABLE users ADD COLUMN local_block_quic INTEGER NOT NULL DEFAULT 1"),
+        ("local_sniff", "ALTER TABLE users ADD COLUMN local_sniff INTEGER NOT NULL DEFAULT 1"),
+    ]
+    for name, sql in add:
+        if name not in cols:
+            con.execute(sql)
+
+
 def _migrate_user_sessions_transport(con):
     """v11 migration: active H2/TURN badge for live sessions."""
     cols = {r["name"] for r in con.execute("PRAGMA table_info(user_sessions)").fetchall()}
@@ -1923,6 +2083,7 @@ def ensure_db():
             _migrate_users_rate_limit_mbps(con)
             _migrate_users_h2_peak(con)
             _migrate_users_turn_profile(con)
+            _migrate_users_local_tun(con)
             _migrate_user_sessions_transport(con)
             _migrate_panel_test_target_to_url(con)
             now = int(time.time())
@@ -1939,7 +2100,7 @@ def ensure_db():
             for k, v in DEFAULT_SETTINGS.items():
                 con.execute("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", (k, v))
             _bootstrap_panel_admin_from_env(con, now)
-            con.execute("INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', '7')")
+            con.execute("INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', '12')")
             con.execute("DELETE FROM settings WHERE key='schema_version'")
             _migrate_legacy_if_needed(con)
             _bootstrap_legacy_shortid(con)
@@ -5944,6 +6105,12 @@ body.nav-open .nav-backdrop{display:block;opacity:1}
     <h3>New user</h3>
     <div class="modal-sub">Создать нового пользователя со своим shortid.</div>
     <label>Имя</label><input type="text" id="addUserName" placeholder="petrov">
+    <label>User type</label>
+    <select id="addUserKind" onchange="toggleAddUserKind()">
+      <option value="remote">Remote client</option>
+      <option value="local_tun">Local TUN / LAN</option>
+    </select>
+    <div id="addRemoteFields">
     <label>H2 transports <span style="color:var(--muted);font-weight:400">(1..4; server opens this many parallel H2 pipes per user)</span></label>
     <select id="addUserPoolSize">
       <option value="1">1</option>
@@ -5961,6 +6128,21 @@ body.nav-open .nav-backdrop{display:block;opacity:1}
       </select>
     </div>
     <label>Expires at <span style="color:var(--muted);font-weight:400">(date, или пусто)</span></label><input type="date" id="addUserExpires">
+    </div>
+    <div id="addLocalFields" style="display:none">
+      <label>LAN source interface</label>
+      <select id="addLocalIface"><option value="">Select interface...</option></select>
+      <div class="cell-meta">Only traffic entering this kernel interface is handled; router-origin traffic stays outside the TUN.</div>
+      <label>TUN device</label><input type="text" id="addLocalTunName" value="taml0">
+      <label>TUN address</label><input type="text" id="addLocalTunAddr" value="198.18.0.1/24">
+      <label>MTU</label><input type="number" id="addLocalTunMTU" min="576" max="9000" value="1280">
+      <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="addLocalAutoRoute" checked style="width:auto"> Install LAN policy routing automatically</label>
+      <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="addLocalBypassPrivate" checked style="width:auto"> Keep private/LAN destinations direct</label>
+      <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="addLocalBlockQUIC" checked style="width:auto"> Disable QUIC for deterministic domain routing</label>
+      <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="addLocalSniff" checked style="width:auto"> Detect TLS SNI / HTTP Host</label>
+      <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="addLocalEnabled" style="width:auto"> Enable immediately</label>
+      <div class="cell-meta">Disabled by default so creating the user cannot interrupt LAN clients.</div>
+    </div>
     <div class="modal-foot">
       <button class="btn btn-ghost" onclick="gid('addUserModal').classList.remove('show')">Cancel</button>
       <button class="btn btn-primary" onclick="submitAddUser()">Create user</button>
@@ -5986,6 +6168,8 @@ body.nav-open .nav-backdrop{display:block;opacity:1}
     <h3>Edit user</h3>
     <input type="hidden" id="editOld">
     <label>Имя</label><input type="text" id="editName">
+    <input type="hidden" id="editKind">
+    <div id="editRemoteFields">
     <label>H2 transports <span style="color:var(--muted);font-weight:400">(1..4; server opens this many parallel H2 pipes per user)</span></label>
     <select id="editPoolSize">
       <option value="1">1</option>
@@ -6013,6 +6197,20 @@ body.nav-open .nav-backdrop{display:block;opacity:1}
       <button type="button" class="btn btn-ghost" onclick="pushTurnRoomFromEdit()">Send</button>
     </div>
     <div class="cell-meta" id="editTurnRoomStatus" style="margin-top:4px"></div>
+    </div>
+    <div id="editLocalFields" style="display:none">
+      <div class="cell-meta" id="editLocalStatus" style="margin-bottom:8px"></div>
+      <label>LAN source interface</label>
+      <select id="editLocalIface"><option value="">Select interface...</option></select>
+      <label>TUN device</label><input type="text" id="editLocalTunName">
+      <label>TUN address</label><input type="text" id="editLocalTunAddr">
+      <label>MTU</label><input type="number" id="editLocalTunMTU" min="576" max="9000">
+      <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="editLocalAutoRoute" style="width:auto"> Install LAN policy routing automatically</label>
+      <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="editLocalBypassPrivate" style="width:auto"> Keep private/LAN destinations direct</label>
+      <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="editLocalBlockQUIC" style="width:auto"> Disable QUIC for deterministic domain routing</label>
+      <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="editLocalSniff" style="width:auto"> Detect TLS SNI / HTTP Host</label>
+      <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="editLocalEnabled" style="width:auto"> Enabled</label>
+    </div>
     <div class="modal-foot">
       <button class="btn btn-ghost" onclick="gid('editModal').classList.remove('show')">Cancel</button>
       <button class="btn btn-primary" onclick="saveEdit()">Save changes</button>
@@ -6350,6 +6548,15 @@ function latencyBadge(tag){
 // the panel just stops surfacing the selector.
 
 function statusDots(u){
+  if(u.user_kind==='local_tun'){
+    const state=u.local_state||((u.local_enabled)?'starting':'disabled');
+    const running=state==='running';
+    const failed=state==='error';
+    const dotClass=running?'on':(failed?'expired':'off');
+    const detail=u.local_error?(': '+u.local_error):'';
+    const badge='<span class="transport-badge '+(running?'h2':'')+'">LOCAL</span>';
+    return '<span class="status-cell"><span class="status-dots"><span class="online-dot '+dotClass+'" title="'+esc(state+detail)+'"></span></span>'+badge+'</span>';
+  }
   // Online detection has two signals:
   //   - online_sessions: count of user_sessions rows updated in last 90s. Reliable
   //     for long-lived TUN connections, unreliable for SOCKS+browser where each
@@ -6439,6 +6646,7 @@ function renderUsers(){
   if(!users.length){el.innerHTML='<div class="status">No users yet — click <b>+ Add user</b></div>';return}
   let h='<table><thead><tr><th style="width:120px">Status</th><th>Name</th><th>Traffic</th><th>Streams</th><th>Limits</th><th style="text-align:right">Actions</th></tr></thead><tbody>';
   for(const u of users){
+    const local=u.user_kind==='local_tun';
     const dl = fmtBytes(u.bytes_down);
     const ul = fmtBytes(u.bytes_up);
     h += '<tr class="profile-row">';
@@ -6449,6 +6657,10 @@ function renderUsers(){
     // semantic). The everyday "unblock without erasing" affordance lives
     // in the Limits column below.
     h += `<td><span class="traf"><span class="traf-d">↓ ${dl}</span><span class="traf-u">↑ ${ul}</span></span><button class="btn-icon-sm" onclick="resetUserBytes('${esc(u.id)}')" title="Reset traffic counters to zero (clears ↓↑ display)">↻</button></td>`;
+    if(local){
+      const quicMode=u.local_block_quic?'QUIC blocked':'QUIC allowed';
+      h+=`<td><div class="cell-meta" style="font-weight:700;color:var(--text)">${esc(u.local_tun_name||'taml0')}</div><div class="cell-meta">LAN ${esc(u.local_iface||'not selected')}</div><div class="cell-meta">TCP + UDP; ${esc(quicMode)}</div></td>`;
+    }else{
     const streamPeakTCP = u.h2_peak_tcp_streams || 0;
     const streamPeakUDP = u.h2_peak_udp_streams || 0;
     const streamLiveTCP = u.h2_live_tcp_streams || 0;
@@ -6461,6 +6673,7 @@ function renderUsers(){
       <div class="cell-meta">H2 transports ${h2Transports}</div>
       <div style="margin-top:5px"><span class="cell-meta" style="font-weight:700;color:var(--text)">LIVE</span> <span class="cell-meta">tcp ${streamLiveTCP} / udp ${streamLiveUDP}</span></div>
     </td>`;
+    }
     const exp = u.expires_at ? '<div class="cell-meta">expires '+esc(fmtExpires(u.expires_at))+'</div>' : '';
     const cap = u.bandwidth_cap ? '<div class="cell-meta">cap '+esc(fmtBandwidth(u.bandwidth_cap))+'</div>' : '';
     const bar = quotaBar(u);
@@ -6469,11 +6682,12 @@ function renderUsers(){
     // restarts from a clean slate while the lifetime traffic display
     // (rendered above) is preserved.
     const resetBtn = u.bandwidth_cap ? `<div class="reset-row"><button class="btn btn-reset" onclick="resetUserQuota('${esc(u.id)}')" title="Restart quota window without erasing traffic stats">Reset Quota</button></div>` : '';
-    const limitsBody = (exp||cap||bar) ? (exp+cap+bar) : '<span class="cell-meta empty">no limits</span>';
+    const localDetail=`<div class="cell-meta">${u.local_enabled?'enabled':'disabled'}; ${u.local_auto_route?'automatic policy route':'external/manual route'}</div>${u.local_error?`<div class="cell-meta" style="color:var(--danger)">${esc(u.local_error)}</div>`:''}`;
+    const limitsBody = local ? localDetail : ((exp||cap||bar) ? (exp+cap+bar) : '<span class="cell-meta empty">no limits</span>');
     h += `<td>${limitsBody}${resetBtn}</td>`;
     h += `<td><div class="actions">
       <button class="btn btn-edit btn-sm" onclick="editUser('${esc(u.id)}')">Edit</button>
-      <button class="btn btn-qr btn-sm" onclick="showUserUri('${esc(u.id)}')">URI</button>
+      ${local?'':`<button class="btn btn-qr btn-sm" onclick="showUserUri('${esc(u.id)}')">URI</button>`}
       <button class="btn btn-del btn-sm" onclick="delUser('${esc(u.id)}')">Del</button>
     </div></td></tr>`;
   }
@@ -6483,7 +6697,7 @@ function renderUsers(){
 function _updateStats(){
   // Update stat cards
   const total = users.length;
-  const online = users.reduce((acc,u)=>acc + (u.online_sessions||0), 0);
+  const online = users.reduce((acc,u)=>acc + (u.user_kind==='local_tun' ? (u.local_state==='running'?1:0) : (u.online_sessions||0)), 0);
   const dl = users.reduce((a,u)=>a+(u.bytes_down||0),0);
   const ul = users.reduce((a,u)=>a+(u.bytes_up||0),0);
   const elU = gid('statUsers');
@@ -6599,27 +6813,82 @@ function quotaPartsToBytes(valueStr, unit){
   return Math.floor(v * m);
 }
 
+async function populateLocalInterfaces(selectId, selected=''){
+  const el=gid(selectId); if(!el) return;
+  el.innerHTML='<option value="">Select interface...</option>';
+  try{
+    const r=await fetch(H+'/api/system/interfaces?t='+Date.now(),{cache:'no-store'});
+    const d=await r.json();
+    const details=Array.isArray(d.details)?d.details:(d.interfaces||[]).map(name=>({name,ipv4:[]}));
+    const names=new Set(details.map(item=>item.name));
+    if(selected && !names.has(selected)){
+      const saved=document.createElement('option'); saved.value=selected; saved.textContent=selected+' (saved)'; el.appendChild(saved);
+    }
+    for(const item of details){
+      const opt=document.createElement('option'); opt.value=item.name;
+      opt.textContent=item.name+((item.ipv4||[]).length?' - '+item.ipv4.join(', '):'');
+      el.appendChild(opt);
+    }
+  }catch(e){}
+  el.value=selected||'';
+}
+
+function toggleAddUserKind(){
+  const local=gid('addUserKind').value==='local_tun';
+  gid('addRemoteFields').style.display=local?'none':'';
+  gid('addLocalFields').style.display=local?'':'none';
+  if(local) populateLocalInterfaces('addLocalIface',gid('addLocalIface').value||'');
+}
+
 function openAddUser(){
   gid('addUserName').value='';
+  gid('addUserKind').value='remote';
   const defaultPool = gid('tamPoolSizeDefault') ? parseInt(gid('tamPoolSizeDefault').value || '1', 10) || 1 : 1;
   gid('addUserPoolSize').value = String(Math.min(4, Math.max(1, defaultPool)));
   gid('addUserQuotaValue').value='';
   gid('addUserQuotaUnit').value='GB';
   gid('addUserExpires').value='';
+  gid('addLocalIface').value='';
+  gid('addLocalTunName').value='taml0';
+  gid('addLocalTunAddr').value='198.18.0.1/24';
+  gid('addLocalTunMTU').value='1280';
+  gid('addLocalAutoRoute').checked=true;
+  gid('addLocalBypassPrivate').checked=true;
+  gid('addLocalBlockQUIC').checked=true;
+  gid('addLocalSniff').checked=true;
+  gid('addLocalEnabled').checked=false;
+  toggleAddUserKind();
   gid('addUserModal').classList.add('show');
 }
 
 async function submitAddUser(){
   const name = gid('addUserName').value.trim();
   if(!name){toast('Введите имя');return}
-  const expRaw = gid('addUserExpires').value.trim();
-  const body = { name, pool_size: parseInt(gid('addUserPoolSize').value || '1', 10) || 1 };
-  if(expRaw){
-    const t = Math.floor(new Date(expRaw).getTime()/1000);
-    if(!isNaN(t)) body.expires_at = t;
+  const kind=gid('addUserKind').value;
+  let body;
+  if(kind==='local_tun'){
+    body={
+      name, user_kind:'local_tun',
+      local_enabled:gid('addLocalEnabled').checked,
+      local_iface:gid('addLocalIface').value.trim(),
+      local_tun_name:gid('addLocalTunName').value.trim(),
+      local_tun_addr:gid('addLocalTunAddr').value.trim(),
+      local_tun_mtu:parseInt(gid('addLocalTunMTU').value||'1280',10),
+      local_auto_route:gid('addLocalAutoRoute').checked,
+      local_bypass_private:gid('addLocalBypassPrivate').checked,
+      local_block_quic:gid('addLocalBlockQUIC').checked,
+      local_sniff:gid('addLocalSniff').checked
+    };
+  }else{
+    const expRaw = gid('addUserExpires').value.trim();
+    body={name,user_kind:'remote',pool_size:parseInt(gid('addUserPoolSize').value||'1',10)||1};
+    if(expRaw){
+      const t=Math.floor(new Date(expRaw).getTime()/1000);
+      if(!isNaN(t)) body.expires_at=t;
+    }
+    const capBytes=quotaPartsToBytes(gid('addUserQuotaValue').value,gid('addUserQuotaUnit').value);
+    if(capBytes>0) body.bandwidth_cap=capBytes;
   }
-  const capBytes = quotaPartsToBytes(gid('addUserQuotaValue').value, gid('addUserQuotaUnit').value);
-  if(capBytes > 0) body.bandwidth_cap = capBytes;
   try{
     const r = await fetch(H+'/api/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     const d = await r.json();
@@ -6683,6 +6952,26 @@ function editUser(uid){
   if(!u) return;
   gid('editOld').value = uid;
   gid('editName').value = u.name;
+  const local=u.user_kind==='local_tun';
+  gid('editKind').value=local?'local_tun':'remote';
+  gid('editRemoteFields').style.display=local?'none':'';
+  gid('editLocalFields').style.display=local?'':'none';
+  if(local){
+    populateLocalInterfaces('editLocalIface',u.local_iface||'');
+    gid('editLocalTunName').value=u.local_tun_name||'taml0';
+    gid('editLocalTunAddr').value=u.local_tun_addr||'198.18.0.1/24';
+    gid('editLocalTunMTU').value=String(u.local_tun_mtu||1280);
+    gid('editLocalAutoRoute').checked=!!u.local_auto_route;
+    gid('editLocalBypassPrivate').checked=!!u.local_bypass_private;
+    gid('editLocalBlockQUIC').checked=!!u.local_block_quic;
+    gid('editLocalSniff').checked=!!u.local_sniff;
+    gid('editLocalEnabled').checked=!!u.local_enabled;
+    const state=u.local_state||'disabled';
+    const error=u.local_error?(' - '+u.local_error):'';
+    gid('editLocalStatus').textContent='Runtime: '+state+error;
+    gid('editModal').classList.add('show');
+    return;
+  }
   gid('editPoolSize').value = String(Math.min(4, Math.max(1, u.pool_size || 1)));
   // Convert cap bytes → {value, unit} for the number + dropdown pair.
   const parts = bytesToQuotaParts(u.bandwidth_cap || 0);
@@ -6712,12 +7001,29 @@ async function saveEdit(){
   const uid = gid('editOld').value;
   const name = gid('editName').value.trim();
   if(!name){toast('Введите имя');return}
-  const expRaw = gid('editExpires').value.trim();
-  const body = { name, pool_size: parseInt(gid('editPoolSize').value || '1', 10) || 1 };
-  body.bandwidth_cap = quotaPartsToBytes(gid('editQuotaValue').value, gid('editQuotaUnit').value);
-  body.rate_limit_mbps = parseInt(gid('editRateMbps').value || '0', 10) || 0;
-  body.expires_at = expRaw ? Math.floor(new Date(expRaw).getTime()/1000) : 0;
-  body.notification_text = gid('editNotification').value;
+  const kind=gid('editKind').value;
+  let body;
+  if(kind==='local_tun'){
+    body={
+      name,user_kind:'local_tun',
+      local_enabled:gid('editLocalEnabled').checked,
+      local_iface:gid('editLocalIface').value.trim(),
+      local_tun_name:gid('editLocalTunName').value.trim(),
+      local_tun_addr:gid('editLocalTunAddr').value.trim(),
+      local_tun_mtu:parseInt(gid('editLocalTunMTU').value||'1280',10),
+      local_auto_route:gid('editLocalAutoRoute').checked,
+      local_bypass_private:gid('editLocalBypassPrivate').checked,
+      local_block_quic:gid('editLocalBlockQUIC').checked,
+      local_sniff:gid('editLocalSniff').checked
+    };
+  }else{
+    const expRaw=gid('editExpires').value.trim();
+    body={name,user_kind:'remote',pool_size:parseInt(gid('editPoolSize').value||'1',10)||1};
+    body.bandwidth_cap=quotaPartsToBytes(gid('editQuotaValue').value,gid('editQuotaUnit').value);
+    body.rate_limit_mbps=parseInt(gid('editRateMbps').value||'0',10)||0;
+    body.expires_at=expRaw?Math.floor(new Date(expRaw).getTime()/1000):0;
+    body.notification_text=gid('editNotification').value;
+  }
   const r = await fetch(H+'/api/users/'+encodeURIComponent(uid),{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   const d = await r.json();
   if(d.error){toast(d.error);return}
@@ -8776,6 +9082,9 @@ class Handler(BaseHTTPRequestHandler):
             if not u:
                 self.send_json({"error": "user not found"}, 404)
                 return
+            if u.get("user_kind") == "local_tun":
+                self.send_json({"error": "local TUN users do not have client URIs"}, 400)
+                return
             uri = make_user_uri(u)
             if not uri:
                 self.send_json({"error": "inbound_priv_key/path not yet configured"}, 400)
@@ -9089,7 +9398,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/users":
             try:
                 u = create_user(self._read_body())
-                uri = make_user_uri(u)
+                uri = None if u.get("user_kind") == "local_tun" else make_user_uri(u)
                 resp = dict(u)
                 if uri:
                     resp["uri"] = uri

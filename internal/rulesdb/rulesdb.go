@@ -293,6 +293,17 @@ func (s *Store) Store(snap *Snapshot) {
 	s.v.Store(snap)
 }
 
+// ResolveRequest applies the published rules to a complete request. Local
+// inbounds use this entry point so source-IP, inbound-tag and user matches are
+// preserved instead of being lost when only host/port are forwarded.
+func ResolveRequest(ctx context.Context, snap *Snapshot, req *node.Request) string {
+	if snap == nil || snap.Dispatcher == nil || req == nil {
+		return ""
+	}
+	tag, _ := snap.Dispatcher.Resolve(ctx, req)
+	return tag
+}
+
 // Resolve runs the published dispatcher (if any) against a synthetic
 // node.Request and returns the chosen outbound tag. Returns "" when no
 // dispatcher is published so the caller falls back to the registry default.
@@ -308,8 +319,7 @@ func Resolve(ctx context.Context, snap *Snapshot, network, host string, port int
 		InboundTag: inboundTag,
 		User:       user,
 	}
-	tag, _ := snap.Dispatcher.Resolve(ctx, req)
-	return tag
+	return ResolveRequest(ctx, snap, req)
 }
 
 // ResolveTCP preserves the historical TCP-only helper signature.
