@@ -269,6 +269,8 @@ func BuildWithGeoDB(rules []Loaded, knownTags []string, defaultTag string, geoDB
 type Snapshot struct {
 	Dispatcher *node.Dispatcher
 	DefaultTag string
+	Rules      []Loaded
+	GeoDB      *node.GeoDB
 }
 
 // Store is a tiny atomic holder so SIGHUP can publish a new dispatcher

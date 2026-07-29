@@ -21,7 +21,7 @@ const (
 
 type linuxRouteController struct{ cfg Config }
 
-func newRouteController(cfg Config) routeController { return &linuxRouteController{cfg: cfg} }
+func newRouteController(cfg Config) routeController { return &selectiveRouteController{cfg: cfg} }
 
 func (r *linuxRouteController) Setup(ctx context.Context) error {
 	if err := runCommand(ctx, nil, "ip", "addr", "replace", r.cfg.TunAddress, "dev", r.cfg.TunName); err != nil {

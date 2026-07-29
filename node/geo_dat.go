@@ -241,6 +241,16 @@ func (db *GeoDB) GeoIPCIDRs(name string) []netip.Prefix {
 	return nil
 }
 
+// GeoSiteDomainRules returns a defensive copy of raw geosite entries for
+// DNS classifiers such as ChinaDNS-NG.
+func (db *GeoDB) GeoSiteDomainRules(name string) []DomainRule {
+	rules, ok := geositeRulesFor(db, name)
+	if !ok {
+		return nil
+	}
+	return cloneDomainRules(rules)
+}
+
 func (db *GeoDB) GeositeMatchers(name string) []domainMatcher {
 	matchers, _, _ := geositeMatchersFor(db, name)
 	return matchers

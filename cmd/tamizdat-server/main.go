@@ -300,7 +300,7 @@ func main() {
 	}
 
 	localTUNMgr := localtun.NewManager(server.OutboundRegistry(), routingStore, server.UserTrafficAccounting(), *debug)
-	if err := reconcileLocalTUN(localTUNMgr, server); err != nil {
+	if err := reconcileLocalTUN(localTUNMgr, server, routingStore.Load()); err != nil {
 		log.Printf("WARN local TUN initial reconcile: %v", err)
 	}
 	defer localTUNMgr.Close()
@@ -425,7 +425,7 @@ func main() {
 			} else {
 				log.Printf("SIGHUP routing reload complete (%d rules)", total)
 			}
-			if err := reconcileLocalTUN(localTUNMgr, server); err != nil {
+			if err := reconcileLocalTUN(localTUNMgr, server, routingStore.Load()); err != nil {
 				log.Printf("SIGHUP local TUN reconcile failed: %v", err)
 			}
 			// Reload VK TURN credential settings.
@@ -667,12 +667,13 @@ func flagsExplicitlySet() map[string]bool {
 // routing/user/outbound tweak through the panel UI froze for half a
 // minute before the new rule actually took effect. Now we re-parse only
 // when one of the geo file mtimes has changed.
-func reconcileLocalTUN(manager *localtun.Manager, server *tamizdat.Server) error {
+func reconcileLocalTUN(manager *localtun.Manager, server *tamizdat.Server, policy *rulesdb.Snapshot) error {
 	serverConfigs := server.LocalTUNConfigs()
 	configs := make([]localtun.Config, 0, len(serverConfigs))
 	for _, cfg := range serverConfigs {
 		configs = append(configs, localtun.Config{
-			UserID: cfg.UserID, UserName: cfg.UserName, Enabled: cfg.Enabled,
+			UserID: cfg.UserID, UserName: cfg.UserName, OutboundTag: cfg.OutboundTag,
+			Enabled: cfg.Enabled, Policy: policy,
 			Interface: cfg.Interface, TunName: cfg.TunName,
 			TunAddress: cfg.TunAddress, MTU: cfg.MTU,
 			AutoRoute: cfg.AutoRoute, BypassPrivate: cfg.BypassPrivate,
@@ -716,7 +717,7 @@ func publishRouting(serverDB, geoDataDir string, store *rulesdb.Store, knownTags
 	if err != nil {
 		return 0, err
 	}
-	store.Store(&rulesdb.Snapshot{Dispatcher: disp, DefaultTag: defaultTag})
+	store.Store(&rulesdb.Snapshot{Dispatcher: disp, DefaultTag: defaultTag, Rules: rules, GeoDB: geoDB})
 	return len(rules), nil
 }
 

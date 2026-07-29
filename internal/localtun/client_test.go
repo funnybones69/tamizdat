@@ -60,7 +60,7 @@ func TestClientTCPThroughDirectOutbound(t *testing.T) {
 	}()
 
 	accounting := &testAccounting{}
-	client := NewClient(obreg.NewRegistry(nil), &rulesdb.Store{}, accounting, "local-1", "router-lan", false)
+	client := NewClient(obreg.NewRegistry(nil), &rulesdb.Store{}, accounting, "local-1", "router-lan", "", false)
 	conn, err := client.DialRequest(context.Background(), &node.Request{
 		Network: node.NetworkTCP, TargetHost: "127.0.0.1", TargetPort: ln.Addr().(*net.TCPAddr).Port,
 		SourceIP: net.ParseIP("192.168.1.105"),
@@ -116,7 +116,7 @@ func TestClientUDPThroughDirectOutbound(t *testing.T) {
 	}()
 
 	accounting := &testAccounting{}
-	client := NewClient(obreg.NewRegistry(nil), &rulesdb.Store{}, accounting, "local-1", "router-lan", false)
+	client := NewClient(obreg.NewRegistry(nil), &rulesdb.Store{}, accounting, "local-1", "router-lan", "", false)
 	port := server.LocalAddr().(*net.UDPAddr).Port
 	pc, err := client.DialPacketRequest(context.Background(), &node.Request{
 		Network: node.NetworkUDP, TargetHost: "127.0.0.1", TargetPort: port,

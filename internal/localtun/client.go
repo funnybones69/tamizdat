@@ -31,12 +31,13 @@ type Client struct {
 	accounting Accounting
 	userID     string
 	userName   string
+	forcedTag  string
 	sniff      bool
 	closed     atomic.Bool
 }
 
-func NewClient(registry *obreg.Registry, rules *rulesdb.Store, accounting Accounting, userID, userName string, sniffEnabled bool) *Client {
-	return &Client{registry: registry, rules: rules, accounting: accounting, userID: userID, userName: userName, sniff: sniffEnabled}
+func NewClient(registry *obreg.Registry, rules *rulesdb.Store, accounting Accounting, userID, userName, forcedTag string, sniffEnabled bool) *Client {
+	return &Client{registry: registry, rules: rules, accounting: accounting, userID: userID, userName: userName, forcedTag: strings.TrimSpace(forcedTag), sniff: sniffEnabled}
 }
 
 func (c *Client) Close() error {
@@ -93,9 +94,10 @@ func (c *Client) DialRequest(ctx context.Context, req *node.Request) (net.Conn, 
 
 func (c *Client) serveTCP(conn net.Conn, req *node.Request) {
 	defer conn.Close()
+	tagPick := c.forcedTag
 	routingConn := conn
 	routingHost := req.TargetHost
-	if c.sniff {
+	if tagPick == "" && c.sniff {
 		host, buffered, err := sniff.PeekConn(conn, []sniff.Sniffer{sniff.TLSClientHello, sniff.HTTPHost})
 		if buffered != nil {
 			routingConn = buffered
@@ -104,9 +106,11 @@ func (c *Client) serveTCP(conn net.Conn, req *node.Request) {
 			routingHost = host
 		}
 	}
-	routeReq := *req
-	routeReq.TargetHost = routingHost
-	tagPick := rulesdb.ResolveRequest(context.Background(), c.rules.Load(), &routeReq)
+	if tagPick == "" {
+		routeReq := *req
+		routeReq.TargetHost = routingHost
+		tagPick = rulesdb.ResolveRequest(context.Background(), c.rules.Load(), &routeReq)
+	}
 	if tagPick == "block" {
 		return
 	}
@@ -136,7 +140,10 @@ func (c *Client) DialPacketRequest(ctx context.Context, req *node.Request) (net.
 	request.Network = node.NetworkUDP
 	request.InboundTag = "local-tun"
 	request.User = c.userName
-	tagPick := rulesdb.ResolveRequest(ctx, c.rules.Load(), &request)
+	tagPick := c.forcedTag
+	if tagPick == "" {
+		tagPick = rulesdb.ResolveRequest(ctx, c.rules.Load(), &request)
+	}
 	if tagPick == "block" {
 		return nil, errors.New("local TUN: UDP blocked by routing rule")
 	}

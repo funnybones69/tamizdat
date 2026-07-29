@@ -5,6 +5,7 @@ import (
 	"errors"
 	"expvar"
 	"fmt"
+	"log"
 	"net/netip"
 	"regexp"
 	"strings"
@@ -35,6 +36,8 @@ type Config struct {
 	UserID        string
 	UserName      string
 	Enabled       bool
+	OutboundTag   string
+	Policy        *rulesdb.Snapshot
 	Interface     string
 	TunName       string
 	TunAddress    string
@@ -48,6 +51,7 @@ type Config struct {
 func (c Config) normalized() Config {
 	c.UserID = strings.TrimSpace(c.UserID)
 	c.UserName = strings.TrimSpace(c.UserName)
+	c.OutboundTag = strings.TrimSpace(c.OutboundTag)
 	c.Interface = strings.TrimSpace(c.Interface)
 	c.TunName = strings.TrimSpace(c.TunName)
 	c.TunAddress = strings.TrimSpace(c.TunAddress)
@@ -84,6 +88,9 @@ func validateConfig(c Config) error {
 		if c.Interface == c.TunName {
 			return errors.New("local source interface must differ from TUN name")
 		}
+	}
+	if c.AutoRoute && (c.OutboundTag == "" || c.OutboundTag == "direct" || c.OutboundTag == "block") {
+		return errors.New("automatic local routing requires a non-direct outbound")
 	}
 	return nil
 }
@@ -189,6 +196,7 @@ func (m *Manager) stopLocked() error {
 
 func (m *Manager) supervise(ctx context.Context, done chan struct{}, generation uint64, cfg Config) {
 	defer close(done)
+	lastLoggedError := ""
 	for {
 		startedAt := time.Now().Unix()
 		err := m.runOnce(ctx, generation, cfg, startedAt)
@@ -198,7 +206,12 @@ func (m *Manager) supervise(ctx context.Context, done chan struct{}, generation 
 		if err == nil {
 			err = errors.New("local TUN stopped unexpectedly")
 		}
-		m.publish(generation, statusFor(cfg, "error", cleanError(err), startedAt))
+		clean := cleanError(err)
+		m.publish(generation, statusFor(cfg, "error", clean, startedAt))
+		if clean != lastLoggedError {
+			log.Printf("local TUN %s setup failed: %s", cfg.UserName, clean)
+			lastLoggedError = clean
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -212,7 +225,7 @@ func (m *Manager) runOnce(ctx context.Context, generation uint64, cfg Config, st
 	routes := newRouteController(cfg)
 	_ = routes.Cleanup(context.Background())
 	defer routes.Cleanup(context.Background())
-	client := NewClient(m.registry, m.rules, m.accounting, cfg.UserID, cfg.UserName, cfg.Sniff)
+	client := NewClient(m.registry, m.rules, m.accounting, cfg.UserID, cfg.UserName, cfg.OutboundTag, cfg.Sniff)
 	defer client.Close()
 	opts := tunengine.Options{
 		Name:                    cfg.TunName,
@@ -259,7 +272,8 @@ func statusFor(cfg Config, state, errText string, startedAt int64) map[string]an
 	return map[string]any{
 		"user_id": cfg.UserID, "user_name": cfg.UserName, "state": state,
 		"interface": cfg.Interface, "tun_name": cfg.TunName, "auto_route": cfg.AutoRoute,
-		"started_at": startedAt, "error": errText,
+		"outbound_tag": cfg.OutboundTag,
+		"started_at":   startedAt, "error": errText,
 	}
 }
 
