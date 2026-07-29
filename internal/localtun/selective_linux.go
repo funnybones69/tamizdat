@@ -61,7 +61,7 @@ func (r *selectiveRouteController) Setup(ctx context.Context) error {
 		return fmt.Errorf("local source interface %q is unavailable: %w", r.cfg.Interface, err)
 	}
 
-	policy, err := buildIngressPolicy(r.cfg.Policy, r.cfg.UserName, r.cfg.OutboundTag)
+	policy, err := buildIngressPolicy(r.cfg.Policy, r.cfg.UserName)
 	if err != nil {
 		return err
 	}

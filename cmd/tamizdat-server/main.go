@@ -672,7 +672,7 @@ func reconcileLocalTUN(manager *localtun.Manager, server *tamizdat.Server, polic
 	configs := make([]localtun.Config, 0, len(serverConfigs))
 	for _, cfg := range serverConfigs {
 		configs = append(configs, localtun.Config{
-			UserID: cfg.UserID, UserName: cfg.UserName, OutboundTag: cfg.OutboundTag,
+			UserID: cfg.UserID, UserName: cfg.UserName,
 			Enabled: cfg.Enabled, Policy: policy,
 			Interface: cfg.Interface, TunName: cfg.TunName,
 			TunAddress: cfg.TunAddress, MTU: cfg.MTU,

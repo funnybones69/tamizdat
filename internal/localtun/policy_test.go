@@ -15,9 +15,12 @@ func TestBuildIngressPolicyKeepsDirectDefaultAndDomainTunnel(t *testing.T) {
 		}},
 		{Priority: 20, OutboundTag: "direct"},
 	}}
-	policy, err := buildIngressPolicy(snap, "router-lan", "sync")
+	policy, err := buildIngressPolicy(snap, "router-lan")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if policy.tunnelTag != "sync" {
+		t.Fatalf("tunnel tag = %q, want sync", policy.tunnelTag)
 	}
 	if len(policy.rules) != 2 || policy.dynamicGroups != 1 {
 		t.Fatalf("rules/groups = %d/%d, want 2/1", len(policy.rules), policy.dynamicGroups)
@@ -30,13 +33,18 @@ func TestBuildIngressPolicyKeepsDirectDefaultAndDomainTunnel(t *testing.T) {
 	}
 }
 
-func TestBuildIngressPolicyRejectsDifferentTunnelOutbound(t *testing.T) {
-	snap := &rulesdb.Snapshot{Rules: []rulesdb.Loaded{{
-		Priority: 1, OutboundTag: "other", Match: rulesdb.Match{IP: []string{"203.0.113.1"}},
-	}}}
-	_, err := buildIngressPolicy(snap, "router-lan", "sync")
-	if err == nil || !strings.Contains(err.Error(), `targets "other"`) {
-		t.Fatalf("error = %v, want incompatible outbound", err)
+func TestBuildIngressPolicyRejectsMultipleTunnelOutbounds(t *testing.T) {
+	snap := &rulesdb.Snapshot{Rules: []rulesdb.Loaded{
+		{
+			Priority: 1, OutboundTag: "sync", Match: rulesdb.Match{IP: []string{"203.0.113.1"}},
+		},
+		{
+			Priority: 2, OutboundTag: "other", Match: rulesdb.Match{IP: []string{"198.51.100.1"}},
+		},
+	}}
+	_, err := buildIngressPolicy(snap, "router-lan")
+	if err == nil || !strings.Contains(err.Error(), "multiple tunnel outbounds") {
+		t.Fatalf("error = %v, want multiple-outbound rejection", err)
 	}
 }
 
@@ -47,7 +55,7 @@ func TestBuildIngressPolicySkipsRulesForAnotherUser(t *testing.T) {
 		}},
 		{Priority: 2, OutboundTag: "direct"},
 	}}
-	policy, err := buildIngressPolicy(snap, "router-lan", "sync")
+	policy, err := buildIngressPolicy(snap, "router-lan")
 	if err != nil {
 		t.Fatal(err)
 	}

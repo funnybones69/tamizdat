@@ -89,9 +89,6 @@ func validateConfig(c Config) error {
 			return errors.New("local source interface must differ from TUN name")
 		}
 	}
-	if c.AutoRoute && (c.OutboundTag == "" || c.OutboundTag == "direct" || c.OutboundTag == "block") {
-		return errors.New("automatic local routing requires a non-direct outbound")
-	}
 	return nil
 }
 
@@ -133,6 +130,14 @@ func (m *Manager) Reconcile(configs []Config) error {
 		if err := validateConfig(*selected); err != nil {
 			return err
 		}
+		tunnelTag, err := localTunnelOutbound(selected.Policy, selected.UserName)
+		if err != nil {
+			return err
+		}
+		if tunnelTag == "" {
+			return errors.New("local TUN has no tunnel outbound in applicable Routing rules")
+		}
+		selected.OutboundTag = tunnelTag
 	}
 
 	m.mu.Lock()

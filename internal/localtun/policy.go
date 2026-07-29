@@ -43,17 +43,50 @@ type ingressRule struct {
 type ingressPolicy struct {
 	rules         []ingressRule
 	dynamicGroups int
+	tunnelTag     string
 }
 
-func buildIngressPolicy(snap *rulesdb.Snapshot, userName, tunnelTag string) (ingressPolicy, error) {
+func localTunnelOutbound(snap *rulesdb.Snapshot, userName string) (string, error) {
+	if snap == nil {
+		return "", nil
+	}
+	userName = strings.TrimSpace(userName)
+	selected := ""
+	for _, loaded := range snap.Rules {
+		m := loaded.Match
+		if !listAllows(m.User, userName) || !listAllows(m.InboundTag, "local-tun") {
+			continue
+		}
+		tag := strings.TrimSpace(loaded.OutboundTag)
+		if tag == "" {
+			return "", fmt.Errorf("local rule priority %d has no outbound", loaded.Priority)
+		}
+		if tag == "direct" || tag == "block" {
+			continue
+		}
+		if selected == "" {
+			selected = tag
+			continue
+		}
+		if selected != tag {
+			return "", fmt.Errorf(
+				"local routing selects multiple tunnel outbounds %q and %q; use one tunnel outbound for router-lan",
+				selected, tag,
+			)
+		}
+	}
+	return selected, nil
+}
+
+func buildIngressPolicy(snap *rulesdb.Snapshot, userName string) (ingressPolicy, error) {
 	var out ingressPolicy
 	userName = strings.TrimSpace(userName)
-	tunnelTag = strings.TrimSpace(tunnelTag)
 	if snap == nil || len(snap.Rules) == 0 {
 		return out, nil
 	}
-	if tunnelTag == "" || tunnelTag == "direct" || tunnelTag == "block" {
-		return out, fmt.Errorf("local TUN requires a non-direct outbound")
+	var err error
+	if out.tunnelTag, err = localTunnelOutbound(snap, userName); err != nil {
+		return out, err
 	}
 
 	for _, loaded := range snap.Rules {
@@ -62,18 +95,19 @@ func buildIngressPolicy(snap *rulesdb.Snapshot, userName, tunnelTag string) (ing
 			continue
 		}
 		rule := ingressRule{index: len(out.rules)}
-		switch loaded.OutboundTag {
+		tag := strings.TrimSpace(loaded.OutboundTag)
+		switch tag {
 		case "direct":
 			rule.action = ingressDirect
 		case "block":
 			rule.action = ingressBlock
-		case tunnelTag:
-			rule.action = ingressTunnel
+		case "":
+			return out, fmt.Errorf("local rule priority %d has no outbound", loaded.Priority)
 		default:
-			return out, fmt.Errorf(
-				"local rule priority %d targets %q; profile outbound is %q",
-				loaded.Priority, loaded.OutboundTag, tunnelTag,
-			)
+			if tag != out.tunnelTag {
+				return out, fmt.Errorf("local rule priority %d targets unexpected outbound %q", loaded.Priority, tag)
+			}
+			rule.action = ingressTunnel
 		}
 
 		rule.network = strings.ToLower(strings.TrimSpace(m.Network))

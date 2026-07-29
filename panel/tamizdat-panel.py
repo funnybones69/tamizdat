@@ -871,7 +871,7 @@ def create_user(body):
     if kind not in ("remote", "local_tun"):
         raise ValueError("user_kind must be remote or local_tun")
 
-    outbound = (body.get("outbound_tag") or "direct").strip() or "direct"
+    outbound = "direct" if kind == "local_tun" else ((body.get("outbound_tag") or "direct").strip() or "direct")
     local = _local_tun_values(body if kind == "local_tun" else {})
     if kind == "local_tun":
         remote_keys = {"pool_size", "expires_at", "bandwidth_cap", "rate_limit_mbps", "notification_text", "turn_room_link"}
@@ -901,8 +901,6 @@ def create_user(body):
         row = con.execute("SELECT 1 FROM outbounds WHERE tag=?", (outbound,)).fetchone()
         if not row:
             raise ValueError(f"outbound_tag {outbound!r} does not exist")
-        if kind == "local_tun" and local["local_enabled"] and local["local_auto_route"] and outbound in ("direct", "block"):
-            raise ValueError("enabled automatic local TUN requires a non-direct outbound")
         if kind == "local_tun" and con.execute("SELECT 1 FROM users WHERE user_kind='local_tun' LIMIT 1").fetchone():
             raise ValueError("only one local TUN user is supported")
         if kind == "remote" and pool_size is None:
@@ -935,19 +933,6 @@ def create_user(body):
 
 def update_user(user_id, body):
     ensure_db()
-    fields = []
-    args = []
-    if "name" in body:
-        n = (body.get("name") or "").strip()
-        if not n:
-            raise ValueError("name cannot be empty")
-        fields.append("name=?"); args.append(n)
-    if "outbound_tag" in body:
-        ob = (body.get("outbound_tag") or "direct").strip() or "direct"
-        with db_conn() as con:
-            if not con.execute("SELECT 1 FROM outbounds WHERE tag=?", (ob,)).fetchone():
-                raise ValueError(f"outbound_tag {ob!r} does not exist")
-        fields.append("outbound_tag=?"); args.append(ob)
     with db_conn() as con:
         existing = con.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
     if not existing:
@@ -956,12 +941,26 @@ def update_user(user_id, body):
     requested_kind = str(body.get("user_kind") or kind).strip().lower()
     if requested_kind != kind:
         raise ValueError("user_kind cannot be changed after creation")
+
+    fields = []
+    args = []
+    if "name" in body:
+        n = (body.get("name") or "").strip()
+        if not n:
+            raise ValueError("name cannot be empty")
+        fields.append("name=?"); args.append(n)
+    if kind == "remote" and "outbound_tag" in body:
+        ob = (body.get("outbound_tag") or "direct").strip() or "direct"
+        with db_conn() as con:
+            if not con.execute("SELECT 1 FROM outbounds WHERE tag=?", (ob,)).fetchone():
+                raise ValueError(f"outbound_tag {ob!r} does not exist")
+        fields.append("outbound_tag=?"); args.append(ob)
     prospective_local = None
     if kind == "local_tun":
+        # The tunnel outbound is selected solely by applicable Routing rules.
+        # Ignore the legacy API field so a cached older panel cannot restore
+        # the removed per-profile selector.
         prospective_local = _local_tun_values(body, existing)
-        prospective_outbound = str(body.get("outbound_tag") if "outbound_tag" in body else existing["outbound_tag"]).strip() or "direct"
-        if prospective_local["local_enabled"] and prospective_local["local_auto_route"] and prospective_outbound in ("direct", "block"):
-            raise ValueError("enabled automatic local TUN requires a non-direct outbound")
         remote_keys = {"pool_size", "expires_at", "bandwidth_cap", "rate_limit_mbps", "notification_text", "turn_room_link"}
         if any(key in body for key in remote_keys):
             raise ValueError("remote profile fields are not valid for a local_tun user")
@@ -6256,9 +6255,7 @@ body.nav-open .nav-backdrop{display:block;opacity:1}
       <label>LAN source interface</label>
       <select id="addLocalIface"><option value="">Select interface...</option></select>
       <div class="cell-meta">Only traffic entering this kernel interface is handled; router-origin traffic stays outside the TUN.</div>
-      <label>H2 outbound</label>
-      <select id="addLocalOutbound"><option value="">Select tunnel...</option></select>
-      <div class="cell-meta">Only rules targeting this outbound enter the local TUN; all other LAN traffic remains direct.</div>
+      <div class="cell-meta">Tunnel destinations and their outbound are controlled exclusively by Routing. Unmatched LAN traffic remains direct.</div>
       <label>TUN device</label><input type="text" id="addLocalTunName" value="taml0">
       <label>TUN address</label><input type="text" id="addLocalTunAddr" value="198.18.0.1/24">
       <label>MTU</label><input type="number" id="addLocalTunMTU" min="576" max="9000" value="1280">
@@ -6328,8 +6325,7 @@ body.nav-open .nav-backdrop{display:block;opacity:1}
       <div class="cell-meta" id="editLocalStatus" style="margin-bottom:8px"></div>
       <label>LAN source interface</label>
       <select id="editLocalIface"><option value="">Select interface...</option></select>
-      <label>H2 outbound</label>
-      <select id="editLocalOutbound"><option value="">Select tunnel...</option></select>
+      <div class="cell-meta">Tunnel destinations and their outbound are controlled exclusively by Routing. Unmatched LAN traffic remains direct.</div>
       <label>TUN device</label><input type="text" id="editLocalTunName">
       <label>TUN address</label><input type="text" id="editLocalTunAddr">
       <label>MTU</label><input type="number" id="editLocalTunMTU" min="576" max="9000">
@@ -6961,30 +6957,12 @@ async function populateLocalInterfaces(selectId, selected=''){
   el.value=selected||'';
 }
 
-function populateLocalOutbounds(selectId, selected=''){
-  const el=gid(selectId); if(!el) return;
-  el.innerHTML='<option value="">Select tunnel...</option>';
-  const usable=(outbounds||[]).filter(o=>o.tag && o.tag!=='direct' && o.tag!=='block');
-  const tags=new Set(usable.map(o=>o.tag));
-  if(selected && !tags.has(selected)){
-    const saved=document.createElement('option'); saved.value=selected; saved.textContent=selected+' (saved)'; el.appendChild(saved);
-  }
-  for(const outbound of usable){
-    const opt=document.createElement('option'); opt.value=outbound.tag;
-    opt.textContent=outbound.tag+' ('+(outbound.kind||outbound.type||'tunnel')+')';
-    el.appendChild(opt);
-  }
-  el.value=selected||'';
-  if(!el.value && usable.length) el.value=usable[0].tag;
-}
-
 function toggleAddUserKind(){
   const local=gid('addUserKind').value==='local_tun';
   gid('addRemoteFields').style.display=local?'none':'';
   gid('addLocalFields').style.display=local?'':'none';
   if(local){
     populateLocalInterfaces('addLocalIface',gid('addLocalIface').value||'');
-    populateLocalOutbounds('addLocalOutbound',gid('addLocalOutbound').value||'');
   }
 }
 
@@ -7005,7 +6983,6 @@ function openAddUser(){
   gid('addLocalBlockQUIC').checked=false;
   gid('addLocalSniff').checked=true;
   gid('addLocalEnabled').checked=false;
-  populateLocalOutbounds('addLocalOutbound','');
   toggleAddUserKind();
   gid('addUserModal').classList.add('show');
 }
@@ -7018,7 +6995,6 @@ async function submitAddUser(){
   if(kind==='local_tun'){
     body={
       name, user_kind:'local_tun',
-      outbound_tag:gid('addLocalOutbound').value.trim(),
       local_enabled:gid('addLocalEnabled').checked,
       local_iface:gid('addLocalIface').value.trim(),
       local_tun_name:gid('addLocalTunName').value.trim(),
@@ -7108,7 +7084,6 @@ function editUser(uid){
   gid('editLocalFields').style.display=local?'':'none';
   if(local){
     populateLocalInterfaces('editLocalIface',u.local_iface||'');
-    populateLocalOutbounds('editLocalOutbound',u.outbound_tag||'');
     gid('editLocalTunName').value=u.local_tun_name||'taml0';
     gid('editLocalTunAddr').value=u.local_tun_addr||'198.18.0.1/24';
     gid('editLocalTunMTU').value=String(u.local_tun_mtu||1280);
@@ -7157,7 +7132,6 @@ async function saveEdit(){
   if(kind==='local_tun'){
     body={
       name,user_kind:'local_tun',
-      outbound_tag:gid('editLocalOutbound').value.trim(),
       local_enabled:gid('editLocalEnabled').checked,
       local_iface:gid('editLocalIface').value.trim(),
       local_tun_name:gid('editLocalTunName').value.trim(),
@@ -7304,8 +7278,6 @@ async function loadOutbounds(){
     activeOb=d.active||'direct';
     renderOutbounds();
     renderUsers();
-    populateLocalOutbounds('addLocalOutbound',gid('addLocalOutbound')?gid('addLocalOutbound').value:'');
-    populateLocalOutbounds('editLocalOutbound',gid('editLocalOutbound')?gid('editLocalOutbound').value:'');
     _updateStats();
     _startObAutoTest();
   }catch(e){}

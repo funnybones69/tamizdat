@@ -3,7 +3,6 @@ package tamizdat
 type LocalTUNConfig struct {
 	UserID        string
 	UserName      string
-	OutboundTag   string
 	Enabled       bool
 	Interface     string
 	TunName       string
@@ -29,7 +28,7 @@ func (s *Server) LocalTUNConfigs() []LocalTUNConfig {
 			continue
 		}
 		out = append(out, LocalTUNConfig{
-			UserID: user.ID, UserName: user.Name, OutboundTag: user.OutboundTag,
+			UserID: user.ID, UserName: user.Name,
 			Enabled:   user.LocalEnabled,
 			Interface: user.LocalInterface, TunName: user.LocalTunName,
 			TunAddress: user.LocalTunAddress, MTU: user.LocalTunMTU,

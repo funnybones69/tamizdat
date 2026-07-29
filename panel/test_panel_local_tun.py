@@ -43,10 +43,6 @@ class PanelLocalTUNTests(unittest.TestCase):
         self.assertEqual(user["local_state"], "disabled")
         self.assertTrue(user["local_block_quic"])
 
-        now = 1
-        with self.panel.db_conn() as con:
-            con.execute("INSERT INTO outbounds(tag,kind,uri,note,created_at,updated_at) VALUES(?,?,?,?,?,?)", ("sync", "tamizdat", "tamizdat://test", "", now, now))
-
         with self.assertRaisesRegex(ValueError, "local_iface is required"):
             self.panel.update_user(user["id"], {"local_enabled": True})
 
@@ -54,10 +50,16 @@ class PanelLocalTUNTests(unittest.TestCase):
             "user_kind": "local_tun",
             "local_enabled": True,
             "local_iface": "br-lan",
-            "outbound_tag": "sync",
         })
         self.assertTrue(updated["local_enabled"])
         self.assertEqual(updated["local_iface"], "br-lan")
+        self.assertEqual(updated["outbound_tag"], "direct")
+
+        ignored = self.panel.update_user(user["id"], {
+            "user_kind": "local_tun",
+            "outbound_tag": "does-not-exist",
+        })
+        self.assertEqual(ignored["outbound_tag"], "direct")
 
     def test_only_one_local_user_and_kind_is_immutable(self):
         user = self.panel.create_user({
