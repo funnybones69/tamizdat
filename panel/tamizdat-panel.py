@@ -6454,8 +6454,6 @@ body.nav-open .nav-backdrop{display:block;opacity:1}
       <option value="tcp">tcp</option>
       <option value="udp">udp</option>
     </select>
-    <label>Inbound tag <span style="color:var(--muted);font-weight:400">(comma list)</span></label>
-    <input type="text" id="ruleInbound" placeholder="tamizdat-in">
     <label>Outbound</label>
     <select id="ruleOutbound" class="user-ob-sel" style="width:100%;min-width:0;padding-top:9px;padding-bottom:9px;font-size:13.5px"></select>
     <label style="display:flex;align-items:center;gap:8px;margin-top:8px"><input type="checkbox" id="ruleEnabled" checked style="width:auto"> Enabled</label>
@@ -8681,7 +8679,6 @@ function openAddRoutingRule(){
   gid('ruleSource').value = '';
   gid('rulePort').value = '';
   gid('ruleNetwork').value = '';
-  gid('ruleInbound').value = '';
   gid('ruleEnabled').checked = true;
   _populateRuleOutboundSelect('direct');
   _populateRuleFolderSelect(null);
@@ -8705,7 +8702,6 @@ function editRoutingRule(id){
   gid('ruleSource').value = (m.source||[]).join(', ');
   gid('rulePort').value = m.port || '';
   gid('ruleNetwork').value = m.network || '';
-  gid('ruleInbound').value = (m.inbound_tag||[]).join(', ');
   gid('ruleEnabled').checked = !!r.enabled;
   _populateRuleOutboundSelect(r.outbound_tag);
   _populateRuleFolderSelect(r.folder_id);
@@ -8728,7 +8724,6 @@ async function saveRoutingRule(){
   const dom = _csvList(gid('ruleDomain').value); if(dom.length) match.domain = dom;
   const usr = _csvList(gid('ruleUser').value); if(usr.length) match.user = usr;
   const src = _csvList(gid('ruleSource').value); if(src.length) match.source = src;
-  const inb = _csvList(gid('ruleInbound').value); if(inb.length) match.inbound_tag = inb;
   const port = gid('rulePort').value.trim(); if(port) match.port = port;
   const nw = gid('ruleNetwork').value.trim(); if(nw) match.network = nw;
   const fSel = gid('ruleFolderSel');

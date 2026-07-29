@@ -134,5 +134,9 @@ class PanelLocalTUNTests(unittest.TestCase):
             timeout=2,
         )
 
+    def test_routing_form_does_not_expose_redundant_inbound_tag(self):
+        self.assertNotIn('id="ruleInbound"', self.panel.PANEL_HTML)
+        self.assertNotIn("match.inbound_tag", self.panel.PANEL_HTML)
+
 if __name__ == "__main__":
     unittest.main()
