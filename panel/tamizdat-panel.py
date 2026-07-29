@@ -863,6 +863,80 @@ def _local_tun_values(body, current=None):
     }
 
 
+def _openwrt_firewall_tools():
+    uci = next((p for p in ("/sbin/uci", "/usr/sbin/uci", "/bin/uci", "/usr/bin/uci") if os.path.isfile(p) and os.access(p, os.X_OK)), None)
+    firewall = "/etc/init.d/firewall"
+    if not uci or not (os.path.isfile(firewall) and os.access(firewall, os.X_OK)):
+        return None, None
+    return uci, firewall
+
+
+def _ensure_openwrt_local_tun_firewall(tun_name):
+    """Allow only LAN-forwarded traffic to the managed local TUN on OpenWrt."""
+    uci, firewall = _openwrt_firewall_tools()
+    if not uci:
+        return False
+    tun_name = str(tun_name or "").strip()
+    if not _LOCAL_IFACE_RE.fullmatch(tun_name):
+        raise ValueError("local_tun_name must be a Linux interface name")
+
+    def run(args, **kwargs):
+        return subprocess.run(args, capture_output=True, text=True, timeout=kwargs.pop("timeout", 5), **kwargs)
+
+    def get(key):
+        result = run([uci, "-q", "get", key], timeout=3)
+        return (result.stdout or "").strip() if result.returncode == 0 else ""
+
+    ready = (
+        get("firewall.tamizdat") == "zone"
+        and get("firewall.tamizdat.name") == "tamizdat"
+        and tun_name in get("firewall.tamizdat.device").split()
+        and get("firewall.tamizdat.input").upper() == "REJECT"
+        and get("firewall.tamizdat.output").upper() == "ACCEPT"
+        and get("firewall.tamizdat.forward").upper() == "REJECT"
+        and get("firewall.lan_to_tamizdat") == "forwarding"
+        and get("firewall.lan_to_tamizdat.src") == "lan"
+        and get("firewall.lan_to_tamizdat.dest") == "tamizdat"
+    )
+    if ready:
+        return False
+
+    backup = run([uci, "export", "firewall"], timeout=5)
+    if backup.returncode != 0:
+        raise RuntimeError("cannot back up OpenWrt firewall configuration")
+
+    commands = [
+        [uci, "-q", "delete", "firewall.tamizdat"],
+        [uci, "set", "firewall.tamizdat=zone"],
+        [uci, "set", "firewall.tamizdat.name=tamizdat"],
+        [uci, "add_list", f"firewall.tamizdat.device={tun_name}"],
+        [uci, "set", "firewall.tamizdat.input=REJECT"],
+        [uci, "set", "firewall.tamizdat.output=ACCEPT"],
+        [uci, "set", "firewall.tamizdat.forward=REJECT"],
+        [uci, "set", "firewall.tamizdat.masq=0"],
+        [uci, "set", "firewall.tamizdat.mtu_fix=0"],
+        [uci, "-q", "delete", "firewall.lan_to_tamizdat"],
+        [uci, "set", "firewall.lan_to_tamizdat=forwarding"],
+        [uci, "set", "firewall.lan_to_tamizdat.src=lan"],
+        [uci, "set", "firewall.lan_to_tamizdat.dest=tamizdat"],
+        [uci, "commit", "firewall"],
+    ]
+
+    try:
+        for command in commands:
+            result = run(command)
+            if result.returncode != 0 and not ("delete" in command and "-q" in command):
+                raise RuntimeError((result.stderr or result.stdout or "UCI command failed").strip())
+        result = run([firewall, "reload"], timeout=15)
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or result.stdout or "firewall reload failed").strip())
+    except Exception as exc:
+        run([uci, "import", "firewall"], input=backup.stdout, timeout=10)
+        run([uci, "commit", "firewall"], timeout=5)
+        run([firewall, "reload"], timeout=15)
+        raise RuntimeError(f"failed to configure OpenWrt LAN to local TUN forwarding: {exc}") from exc
+    return True
+
 def create_user(body):
     name = (body.get("name") or "").strip()
     if not name:
@@ -910,6 +984,8 @@ def create_user(body):
                 pool_size = 1
             if pool_size <= 0 or pool_size > 4:
                 pool_size = 1
+        if kind == "local_tun" and local["local_enabled"] and local["local_auto_route"]:
+            _ensure_openwrt_local_tun_firewall(local["local_tun_name"])
         master = _new_unique_master_shortid(con)
         uid = secrets.token_hex(8)
         now = int(time.time())
@@ -1040,6 +1116,8 @@ def update_user(user_id, body):
             fields.append("turn_profile_pending=?"); args.append(1)
             fields.append("turn_profile_version=COALESCE(turn_profile_version,0)+1")
             fields.append("turn_profile_updated_at=?"); args.append(now)
+    if kind == "local_tun" and touched_local and prospective_local["local_enabled"] and prospective_local["local_auto_route"]:
+        _ensure_openwrt_local_tun_firewall(prospective_local["local_tun_name"])
     if not fields:
         return get_user(user_id)
     fields.append("updated_at=?"); args.append(int(time.time()))

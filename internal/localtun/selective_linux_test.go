@@ -22,6 +22,7 @@ func TestSelectiveNFTConfigIsValidAndNeverMarksAllLAN(t *testing.T) {
 	for _, want := range []string{
 		`iifname { "br-lan", "phy0-ap0" }`,
 		`ip daddr @r14 meta mark set 0x9d return`,
+		`ip6 daddr @r16 reject with icmpv6 addr-unreachable`,
 		`ip daddr @r24 meta mark set 0x9d return`,
 		`set r14 { type ipv4_addr; flags interval; }`,
 		`set r24 { type ipv4_addr; flags interval; auto-merge;`,
@@ -32,6 +33,9 @@ func TestSelectiveNFTConfigIsValidAndNeverMarksAllLAN(t *testing.T) {
 	}
 	if strings.Contains(got, `iifname "br-lan" meta l4proto { tcp, udp } meta mark set`) {
 		t.Fatalf("selective config contains blanket LAN marking:\n%s", got)
+	}
+	if strings.Contains(got, `ip6 daddr @r16 meta mark set`) {
+		t.Fatalf("IPv6-only destinations must not be sent to the IPv4-only TUN:\n%s", got)
 	}
 	if _, err := exec.LookPath("nft"); err == nil {
 		cmd := exec.Command("nft", "-c", "-f", "-")

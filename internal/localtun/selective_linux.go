@@ -89,20 +89,14 @@ func (r *selectiveRouteController) Setup(ctx context.Context) error {
 	if err := runCommand(ctx, nil, "ip", "route", "replace", "table", localTableID, "default", "dev", r.cfg.TunName); err != nil {
 		return err
 	}
-	if err := runCommand(ctx, nil, "ip", "-6", "route", "replace", "table", localTableID, "default", "dev", r.cfg.TunName); err != nil {
-		_ = runCommand(context.Background(), nil, "ip", "route", "flush", "table", localTableID)
-		return err
-	}
+	// The v1 local TUN data plane is IPv4-only. Older builds installed an
+	// IPv6 default route to the TUN anyway, which black-holed IPv6-preferred
+	// clients such as iOS. Remove any stale IPv6 policy state; nft rejects
+	// only tunnel-selected IPv6 destinations so clients immediately retry A.
+	_ = runCommand(ctx, nil, "ip", "-6", "rule", "del", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID)
+	_ = runCommand(ctx, nil, "ip", "-6", "route", "del", "default", "dev", r.cfg.TunName)
 	_ = runCommand(ctx, nil, "ip", "rule", "del", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID)
 	if err := runCommand(ctx, nil, "ip", "rule", "add", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID); err != nil {
-		_ = runCommand(context.Background(), nil, "ip", "-6", "route", "flush", "table", localTableID)
-		_ = runCommand(context.Background(), nil, "ip", "route", "flush", "table", localTableID)
-		return err
-	}
-	_ = runCommand(ctx, nil, "ip", "-6", "rule", "del", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID)
-	if err := runCommand(ctx, nil, "ip", "-6", "rule", "add", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID); err != nil {
-		_ = runCommand(context.Background(), nil, "ip", "rule", "del", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID)
-		_ = runCommand(context.Background(), nil, "ip", "-6", "route", "flush", "table", localTableID)
 		_ = runCommand(context.Background(), nil, "ip", "route", "flush", "table", localTableID)
 		return err
 	}
@@ -114,7 +108,7 @@ func (r *selectiveRouteController) Cleanup(ctx context.Context) error {
 	// the original DNS upstreams, then terminate our private ChinaDNS process.
 	_ = runCommand(ctx, nil, "nft", "delete", "table", "inet", localNFTTable)
 	_ = runCommand(ctx, nil, "ip", "-6", "rule", "del", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID)
-	_ = runCommand(ctx, nil, "ip", "-6", "route", "flush", "table", localTableID)
+	_ = runCommand(ctx, nil, "ip", "-6", "route", "del", "default", "dev", r.cfg.TunName)
 	_ = runCommand(ctx, nil, "ip", "rule", "del", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID)
 	_ = runCommand(ctx, nil, "ip", "route", "flush", "table", localTableID)
 	return r.cleanupManagedDNS(ctx)
@@ -187,25 +181,32 @@ func nftRuleLines(rule ingressRule, iif string) []string {
 	if len(rule.ports) > 0 {
 		base = append(base, "th dport { "+joinPorts(rule.ports)+" }")
 	}
-	action := "return"
+	action4, action6 := "return", "return"
 	switch rule.action {
 	case ingressTunnel:
-		action = "meta mark set 0x9d return"
+		action4 = "meta mark set 0x9d return"
+		action6 = "reject with icmpv6 addr-unreachable"
 	case ingressBlock:
-		action = "drop"
+		action4, action6 = "drop", "drop"
 	}
 
 	hasDestination := len(rule.domains)+len(rule.ipv4)+len(rule.ipv6) > 0
 	if !hasDestination {
 		lines := make([]string, 0, 2)
 		if len(rule.source4) == 0 && len(rule.source6) == 0 {
-			return []string{strings.Join(append(base, action), " ")}
+			if action4 == action6 {
+				return []string{strings.Join(append(base, action4), " ")}
+			}
+			return []string{
+				strings.Join(append(append([]string{}, base...), "meta nfproto ipv4", action4), " "),
+				strings.Join(append(append([]string{}, base...), "meta nfproto ipv6", action6), " "),
+			}
 		}
 		if len(rule.source4) > 0 {
-			lines = append(lines, strings.Join(append(append([]string{}, base...), "ip saddr { "+joinPrefixes(rule.source4)+" }", action), " "))
+			lines = append(lines, strings.Join(append(append([]string{}, base...), "ip saddr { "+joinPrefixes(rule.source4)+" }", action4), " "))
 		}
 		if len(rule.source6) > 0 {
-			lines = append(lines, strings.Join(append(append([]string{}, base...), "ip6 saddr { "+joinPrefixes(rule.source6)+" }", action), " "))
+			lines = append(lines, strings.Join(append(append([]string{}, base...), "ip6 saddr { "+joinPrefixes(rule.source6)+" }", action6), " "))
 		}
 		return lines
 	}
@@ -217,7 +218,7 @@ func nftRuleLines(rule ingressRule, iif string) []string {
 			if len(rule.source4) > 0 {
 				parts = append(parts, "ip saddr { "+joinPrefixes(rule.source4)+" }")
 			}
-			parts = append(parts, fmt.Sprintf("ip daddr @r%d4", rule.index), action)
+			parts = append(parts, fmt.Sprintf("ip daddr @r%d4", rule.index), action4)
 			lines = append(lines, strings.Join(parts, " "))
 		}
 	}
@@ -227,7 +228,7 @@ func nftRuleLines(rule ingressRule, iif string) []string {
 			if len(rule.source6) > 0 {
 				parts = append(parts, "ip6 saddr { "+joinPrefixes(rule.source6)+" }")
 			}
-			parts = append(parts, fmt.Sprintf("ip6 daddr @r%d6", rule.index), action)
+			parts = append(parts, fmt.Sprintf("ip6 daddr @r%d6", rule.index), action6)
 			lines = append(lines, strings.Join(parts, " "))
 		}
 	}

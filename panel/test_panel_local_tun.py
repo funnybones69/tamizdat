@@ -120,6 +120,28 @@ class PanelLocalTUNTests(unittest.TestCase):
         self.assertEqual(merged[0]["bytes_down"], 123)
         self.assertEqual(merged[0]["bytes_up"], 456)
 
+    def test_openwrt_firewall_setup_allows_only_lan_to_local_tun(self):
+        calls = []
+
+        def fake_run(args, **kwargs):
+            calls.append((list(args), dict(kwargs)))
+            if list(args)[1:3] == ["-q", "get"]:
+                return mock.Mock(returncode=1, stdout="", stderr="")
+            if list(args)[1:] == ["export", "firewall"]:
+                return mock.Mock(returncode=0, stdout="config defaults\n", stderr="")
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(self.panel, "_openwrt_firewall_tools", return_value=("/sbin/uci", "/etc/init.d/firewall")):
+            with mock.patch.object(self.panel.subprocess, "run", side_effect=fake_run):
+                changed = self.panel._ensure_openwrt_local_tun_firewall("taml0")
+
+        self.assertTrue(changed)
+        commands = [call[0] for call in calls]
+        self.assertIn(["/sbin/uci", "add_list", "firewall.tamizdat.device=taml0"], commands)
+        self.assertIn(["/sbin/uci", "set", "firewall.lan_to_tamizdat.src=lan"], commands)
+        self.assertIn(["/sbin/uci", "set", "firewall.lan_to_tamizdat.dest=tamizdat"], commands)
+        self.assertIn(["/etc/init.d/firewall", "reload"], commands)
+
     def test_openwrt_init_status_maps_running_to_active(self):
         result = mock.Mock(returncode=0, stdout="running\\n", stderr="")
         with mock.patch.object(self.panel, "_openwrt_service_script", return_value="/etc/init.d/tamizdat-server"):
