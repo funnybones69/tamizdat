@@ -2,6 +2,7 @@
 import os
 import tempfile
 import unittest
+from unittest import mock
 from importlib.machinery import SourceFileLoader
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -94,6 +95,42 @@ class PanelLocalTUNTests(unittest.TestCase):
             "local_bypass_private", "local_block_quic", "local_sniff",
         }.issubset(cols))
 
+
+    def test_local_runtime_marks_running_and_uses_tun_counters(self):
+        user = {
+            "id": 1,
+            "user_kind": "local_tun",
+            "local_enabled": True,
+            "local_state": "starting",
+            "local_error": "",
+            "bytes_down": 0,
+            "bytes_up": 0,
+        }
+        runtime = {
+            "local_state": "running",
+            "local_error": "",
+            "bytes_down": 123,
+            "bytes_up": 456,
+        }
+        with mock.patch.object(self.panel, "_local_tun_runtime", return_value=runtime):
+            merged = self.panel._merge_local_tun_runtime([user])
+        self.assertEqual(merged[0]["local_state"], "running")
+        self.assertEqual(merged[0]["bytes_down"], 123)
+        self.assertEqual(merged[0]["bytes_up"], 456)
+
+    def test_openwrt_init_status_maps_running_to_active(self):
+        result = mock.Mock(returncode=0, stdout="running\\n", stderr="")
+        with mock.patch.object(self.panel, "_openwrt_service_script", return_value="/etc/init.d/tamizdat-server"):
+            with mock.patch.object(self.panel.subprocess, "run", return_value=result) as run:
+                status, detail = self.panel.managed_service_status()
+        self.assertEqual(status, "active")
+        self.assertEqual(detail, "")
+        run.assert_called_once_with(
+            ["/etc/init.d/tamizdat-server", "status"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
 
 if __name__ == "__main__":
     unittest.main()

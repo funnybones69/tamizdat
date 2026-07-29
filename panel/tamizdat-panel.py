@@ -44,6 +44,8 @@ TAG_RE = re.compile(r"^[\w.-]{1,64}$", re.UNICODE)
 PANEL_USERNAME_RE = re.compile(r"^[A-Za-z0-9_.@-]{1,64}$")
 HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
 PANEL_PBKDF2_ITERATIONS = int(os.environ.get("TAMIZDAT_PANEL_PBKDF2_ITERATIONS", "260000"))
+MANAGED_SERVICE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+LOCAL_TUN_POLICY_RULE = "fwmark 0x9d/0xff lookup 157"
 
 # Canonical path for the X25519 private key the server reads via -privkey-file.
 # 2026-05-11 dead-mine fix: panel-side PUT to inbound_priv_key now atomically
@@ -522,6 +524,8 @@ _LIVE_USERS_CACHE = {"at": 0.0, "data": {}}
 _LIVE_USERS_LOCK = threading.Lock()
 _LIVE_OUTBOUNDS_CACHE = {"at": 0.0, "data": {}}
 _LIVE_OUTBOUNDS_LOCK = threading.Lock()
+_LOCAL_TUN_RUNTIME_CACHE = {"at": 0.0, "key": None, "data": {}}
+_LOCAL_TUN_RUNTIME_LOCK = threading.Lock()
 
 
 def _intish(v, default=0):
@@ -588,6 +592,117 @@ def _merge_live_user_counts(users, live):
         if item:
             u.update(item)
     return users
+
+
+def _read_interface_bytes(name):
+    try:
+        with open("/proc/net/dev", "r", encoding="utf-8") as f:
+            for line in f:
+                if ":" not in line:
+                    continue
+                iface, raw = line.split(":", 1)
+                if iface.strip() != name:
+                    continue
+                fields = raw.split()
+                if len(fields) >= 9:
+                    return _intish(fields[0]), _intish(fields[8])
+    except Exception:
+        pass
+    return 0, 0
+
+
+def _interface_is_up(name):
+    try:
+        with open(f"/sys/class/net/{name}/flags", "r", encoding="utf-8") as f:
+            return bool(int(f.read().strip(), 16) & 0x1)
+    except Exception:
+        return False
+
+
+def _local_policy_rule_present():
+    try:
+        r = subprocess.run(["ip", "rule", "show"], capture_output=True, text=True, timeout=0.35)
+        return LOCAL_TUN_POLICY_RULE in (r.stdout or "")
+    except Exception:
+        return False
+
+
+def _local_tun_runtime(user):
+    if not bool(user.get("local_enabled")):
+        return {"local_state": "disabled", "local_error": "", "bytes_down": 0, "bytes_up": 0}
+
+    name = str(user.get("local_tun_name") or "taml0").strip()
+    if not _LOCAL_IFACE_RE.fullmatch(name):
+        return {"local_state": "error", "local_error": "invalid local TUN name", "bytes_down": 0, "bytes_up": 0}
+    key = (name, bool(user.get("local_auto_route")))
+    now = time.monotonic()
+    with _LOCAL_TUN_RUNTIME_LOCK:
+        cached = _LOCAL_TUN_RUNTIME_CACHE
+        if cached.get("key") == key and now - float(cached.get("at") or 0) < 1.0:
+            return dict(cached.get("data") or {})
+
+    up = _interface_is_up(name)
+    policy_ready = not key[1] or _local_policy_rule_present()
+    bytes_down, bytes_up = _read_interface_bytes(name)
+    if not up:
+        data = {"local_state": "starting", "local_error": "TUN device is not up", "bytes_down": bytes_down, "bytes_up": bytes_up}
+    elif not policy_ready:
+        data = {"local_state": "starting", "local_error": "policy route is not ready", "bytes_down": bytes_down, "bytes_up": bytes_up}
+    else:
+        data = {"local_state": "running", "local_error": "", "bytes_down": bytes_down, "bytes_up": bytes_up}
+    with _LOCAL_TUN_RUNTIME_LOCK:
+        _LOCAL_TUN_RUNTIME_CACHE.update({"at": now, "key": key, "data": dict(data)})
+    return data
+
+
+def _merge_local_tun_runtime(users):
+    for user in users:
+        if user.get("user_kind") != "local_tun":
+            continue
+        runtime = _local_tun_runtime(user)
+        if user.get("local_state") in ("", "starting", "disabled"):
+            user["local_state"] = runtime["local_state"]
+            user["local_error"] = runtime["local_error"]
+        if runtime["local_state"] == "running":
+            user["bytes_down"] = runtime["bytes_down"]
+            user["bytes_up"] = runtime["bytes_up"]
+    return users
+
+
+def _openwrt_service_script():
+    name = str(SERVICE_NAME or "").strip()
+    if not MANAGED_SERVICE_NAME_RE.fullmatch(name):
+        return None
+    path = os.path.join("/etc/init.d", name)
+    return path if os.path.isfile(path) and os.access(path, os.X_OK) else None
+
+
+def managed_service_status():
+    try:
+        init_script = _openwrt_service_script()
+        if init_script:
+            r = subprocess.run([init_script, "status"], capture_output=True, text=True, timeout=2)
+            detail = ((r.stdout or "") + (r.stderr or "")).strip()
+            return ("active" if r.returncode == 0 and "running" in detail.lower() else "inactive"), ""
+
+        r = subprocess.run(["systemctl", "is-active", SERVICE_NAME], capture_output=True, text=True, timeout=2)
+        status = r.stdout.strip() or "unknown"
+        uptime = ""
+        if status == "active":
+            r2 = subprocess.run(["systemctl", "show", SERVICE_NAME, "--property=ActiveEnterTimestamp"], capture_output=True, text=True, timeout=2)
+            ts = r2.stdout.strip().split("=", 1)[-1]
+            if ts:
+                uptime = f"since {ts}"
+        return status, uptime
+    except Exception as e:
+        return "unknown", str(e)
+
+
+def managed_service_action(action):
+    init_script = _openwrt_service_script()
+    if init_script:
+        return subprocess.Popen([init_script, action], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return subprocess.Popen(["systemctl", action, SERVICE_NAME])
 
 
 def _live_outbounds_from_expvar():
@@ -673,7 +788,8 @@ def list_users():
     for r in rows:
         n, p, active_transport = online.get(r["id"], (0, -1, ""))
         out.append(_user_row_to_dict(r, n, p, active_transport))
-    return _merge_live_user_counts(out, _live_users_from_expvar())
+    out = _merge_live_user_counts(out, _live_users_from_expvar())
+    return _merge_local_tun_runtime(out)
 
 
 def get_user(user_id):
@@ -683,7 +799,7 @@ def get_user(user_id):
         if not row:
             return None
         n, p, active_transport = _online_counts(con).get(user_id, (0, -1, ""))
-    return _user_row_to_dict(row, n, p, active_transport)
+    return _merge_local_tun_runtime([_user_row_to_dict(row, n, p, active_transport)])[0]
 
 
 _LOCAL_IFACE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,15}$")
@@ -9205,18 +9321,11 @@ class Handler(BaseHTTPRequestHandler):
             # in the routing-rule modal. Cached + invalidated on file mtime.
             self.send_json(_load_geo_categories())
         elif path == "/api/service":
-            try:
-                r = subprocess.run(["systemctl", "is-active", SERVICE_NAME], capture_output=True, text=True)
-                status = r.stdout.strip() or "unknown"
-                uptime = ""
-                if status == "active":
-                    r2 = subprocess.run(["systemctl", "show", SERVICE_NAME, "--property=ActiveEnterTimestamp"], capture_output=True, text=True)
-                    ts = r2.stdout.strip().split("=", 1)[-1]
-                    if ts:
-                        uptime = f"since {ts}"
-                self.send_json({"status": status, "uptime": uptime, "traffic_dl": 0, "traffic_ul": 0, "traffic_available": False})
-            except Exception as e:
-                self.send_json({"status": "unknown", "error": str(e), "traffic_dl": 0, "traffic_ul": 0, "traffic_available": False})
+            status, detail = managed_service_status()
+            response = {"status": status, "uptime": detail if status == "active" else "", "traffic_dl": 0, "traffic_ul": 0, "traffic_available": False}
+            if status == "unknown" and detail:
+                response["error"] = detail
+            self.send_json(response)
         elif path == "/api/sysinfo":
             # CPU/RAM/Swap/Disk for the Overview resource ring widget.
             self.send_json(get_sysinfo())
@@ -9595,7 +9704,7 @@ class Handler(BaseHTTPRequestHandler):
             if action not in ("start", "stop", "restart"):
                 self.send_json({"error": "Invalid action"}, 400); return
             try:
-                subprocess.Popen(["systemctl", action, SERVICE_NAME])
+                managed_service_action(action)
                 self.send_json({"ok": True})
             except Exception as e:
                 self.send_json({"error": str(e)}, 500)
