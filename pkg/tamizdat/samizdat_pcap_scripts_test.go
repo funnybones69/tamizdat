@@ -11,6 +11,11 @@ import (
 
 func runPcapScriptFixture(t *testing.T, input string, args ...string) (string, error) {
 	t.Helper()
+	for i, arg := range args {
+		if strings.HasPrefix(arg, "scripts/") {
+			args[i] = filepath.Join("..", "..", arg)
+		}
+	}
 	cmd := exec.Command("python3", args...)
 	if input != "" {
 		cmd.Stdin = strings.NewReader(input)
@@ -24,7 +29,7 @@ func runPcapScriptFixture(t *testing.T, input string, args ...string) (string, e
 
 func readPcapFixture(t *testing.T, name string) string {
 	t.Helper()
-	path := filepath.Join("agents", "fixtures", "pcap", name)
+	path := filepath.Join("..", "..", "agents", "fixtures", "pcap", name)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read fixture %s: %v", name, err)

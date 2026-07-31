@@ -120,3 +120,82 @@ func TestExternalRoomCredentialHelperFeedsMultiRoomCache(t *testing.T) {
 		t.Fatalf("room cache aliases helper result: %#v", cached)
 	}
 }
+
+func TestCredentialsForAttemptUsesLatestPublishedGeneration(t *testing.T) {
+	r, err := New(Config{PeerAddr: "127.0.0.1:443", WorkersPerRoom: 20, VKHashes: []string{"room"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fallback := &Credentials{User: "old-user", Pass: "old-pass", Lifetime: 600}
+	latest := &Credentials{User: "new-user", Pass: "new-pass", Lifetime: 600}
+	r.updateRoomCreds("room", latest)
+	got := r.credentialsForAttempt("room", fallback)
+	if got == nil || got.User != latest.User || got.Pass != latest.Pass {
+		t.Fatalf("attempt credentials=%#v want latest generation", got)
+	}
+}
+
+func TestInvalidateCredentialsCannotDeleteNewerGeneration(t *testing.T) {
+	r, err := New(Config{PeerAddr: "127.0.0.1:443", WorkersPerRoom: 20, VKHashes: []string{"room"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := &Credentials{User: "same-user", Pass: "old-pass", Lifetime: 600}
+	fresh := &Credentials{User: "same-user", Pass: "new-pass", Lifetime: 600}
+	r.updateRoomCreds("room", fresh)
+	r.invalidateCredentials("room", stale)
+	if got := r.currentRoomCreds("room"); got == nil || got.Pass != fresh.Pass {
+		t.Fatalf("stale invalidation removed fresh generation: %#v", got)
+	}
+	r.invalidateCredentials("room", fresh)
+	if got := r.currentRoomCreds("room"); got != nil {
+		t.Fatalf("matching generation survived invalidation: %#v", got)
+	}
+}
+
+func TestForcedCredentialRefreshIsPerRoomAndOnePerMinute(t *testing.T) {
+	r := &Runner{}
+	now := time.Unix(10, 0)
+	if !r.reserveForcedCredentialRefresh("room-a", now) {
+		t.Fatal("first room-a refresh rejected")
+	}
+	if r.reserveForcedCredentialRefresh("room-a", now.Add(59*time.Second)) {
+		t.Fatal("second room-a refresh inside one minute accepted")
+	}
+	if !r.reserveForcedCredentialRefresh("room-b", now.Add(time.Second)) {
+		t.Fatal("sibling room was rate limited by room-a")
+	}
+	if !r.reserveForcedCredentialRefresh("room-a", now.Add(time.Minute)) {
+		t.Fatal("room-a refresh remained limited after one minute")
+	}
+}
+
+func TestSiblingRefreshReusesOneFreshCredentialFetch(t *testing.T) {
+	calls := 0
+	r, err := New(Config{
+		PeerAddr:       "127.0.0.1:443",
+		WorkersPerRoom: 20,
+		VKHashes:       []string{"room"},
+		UseUDP:         true,
+		AcquireRoomCredentials: func(context.Context, string) (*Credentials, error) {
+			calls++
+			return &Credentials{User: "fresh-user", Pass: "fresh-pass", TurnURLs: []string{"turn.example:3478"}, Lifetime: 600}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := &Credentials{User: "stale-user", Pass: "stale-pass", TurnURLs: []string{"turn.example:3478"}, Lifetime: 600}
+	r.updateRoomCreds("room", stale)
+	first, err := r.refreshCredentialsForGeneration(context.Background(), &TurnParams{}, "room", stale, NewStats())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := r.refreshCredentialsForGeneration(context.Background(), &TurnParams{}, "room", stale, NewStats())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || first.User != "fresh-user" || second.User != "fresh-user" {
+		t.Fatalf("calls=%d first=%#v second=%#v", calls, first, second)
+	}
+}

@@ -153,11 +153,11 @@ func (r *selectiveRouteController) nftConfig(policy ingressPolicy, ifaces []stri
 			continue
 		}
 		if len(rule.ipv4) > 0 {
-			fmt.Fprintf(&b, "  set r%d4 { type ipv4_addr; flags interval; elements = { %s }; }\n",
+			fmt.Fprintf(&b, "  set r%d4 { type ipv4_addr; flags interval; auto-merge; elements = { %s }; }\n",
 				rule.index, joinPrefixes(rule.ipv4))
 		}
 		if len(rule.ipv6) > 0 {
-			fmt.Fprintf(&b, "  set r%d6 { type ipv6_addr; flags interval; elements = { %s }; }\n",
+			fmt.Fprintf(&b, "  set r%d6 { type ipv6_addr; flags interval; auto-merge; elements = { %s }; }\n",
 				rule.index, joinPrefixes(rule.ipv6))
 		}
 	}

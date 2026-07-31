@@ -208,7 +208,8 @@ func TestV1_RotationOnDoesNotExceedTwoTransports(t *testing.T) {
 
 	freshConn, err := client.DialContext(ctx, "tcp", "after-rotation.example:443")
 	if err != nil {
-		t.Fatalf("fresh DialContext after cap: %v", err)
+		total, draining := poolCounts(client.pool)
+		t.Fatalf("fresh DialContext after cap: %v (total=%d draining=%d allowance=%d max=%d)", err, total, draining, client.pool.rotationOverlapAllowance, client.pool.maxTransports)
 	}
 	_ = freshConn.Close()
 	if got := handshakes.Load(); got != 2 {

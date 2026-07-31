@@ -12,12 +12,14 @@ import (
 )
 
 const (
-	defaultListen       = "127.0.0.1:9000"
-	defaultWorkers      = workersPerGroup
-	maxWorkers          = 20
-	maxRooms            = 4
-	maxWorkersPerRoom   = 20
-	maxMultiRoomWorkers = maxRooms * maxWorkersPerRoom
+	defaultListen  = "127.0.0.1:9000"
+	defaultWorkers = workersPerGroup
+	maxWorkers     = 20
+	// MaxRooms and the worker limits are exported so CLI validation, the
+	// capability manifest, and the runtime share one production contract.
+	MaxRooms            = 6
+	MaxWorkersPerRoom   = 20
+	MaxMultiRoomWorkers = MaxRooms * MaxWorkersPerRoom
 	defaultVKAppID      = "6287487"
 	defaultVKAppSecret  = "QbYic1K3lEV5kTGiqlq2"
 	defaultUserAgent    = "Mozilla/5.0"
@@ -55,6 +57,7 @@ type Config struct {
 	// built-in autonomous providers as fallback.
 	AcquireRoomCredentials func(context.Context, string) (*Credentials, error)
 	BondV2                 bool
+	WorkerRateBPS          int
 	OnConfig               func(string)
 	OnQuota                func(string)
 	OnWorkerCount          func(int)
@@ -97,6 +100,8 @@ type Runner struct {
 	groupAuthMutex     sync.Mutex
 	roomAuthMu         sync.Mutex
 	roomAuthLocks      map[string]*sync.Mutex
+	forcedCredsMu      sync.Mutex
+	forcedCredsAt      map[string]time.Time
 
 	pauseFlag int32
 
@@ -146,6 +151,9 @@ func New(cfg Config) (*Runner, error) {
 	if !cfg.UseTCP && !cfg.UseUDP {
 		cfg.UseTCP = true
 	}
+	if cfg.WorkerRateBPS <= 0 {
+		cfg.WorkerRateBPS = DefaultWorkerRateBPS
+	}
 	cfg.VKHashes = normalizeHashes(cfg.VKHashes)
 	if len(cfg.VKHashes) == 0 && cfg.PreloadedCreds != nil {
 		cfg.VKHashes = []string{"preloaded"}
@@ -154,14 +162,14 @@ func New(cfg Config) (*Runner, error) {
 		return nil, fmt.Errorf("нужны PeerAddr и VKHashes")
 	}
 	if cfg.WorkersPerRoom > 0 {
-		if len(cfg.VKHashes) > maxRooms {
-			return nil, fmt.Errorf("multi-room supports at most %d rooms", maxRooms)
+		if len(cfg.VKHashes) > MaxRooms {
+			return nil, fmt.Errorf("multi-room supports at most %d rooms", MaxRooms)
 		}
 		if cfg.BondV2 && len(cfg.VKHashes) < 2 {
 			return nil, fmt.Errorf("Bond v2 requires multi-room mode with at least 2 rooms")
 		}
-		if cfg.WorkersPerRoom > maxWorkersPerRoom {
-			return nil, fmt.Errorf("workers per room must be between 1 and %d", maxWorkersPerRoom)
+		if cfg.WorkersPerRoom > MaxWorkersPerRoom {
+			return nil, fmt.Errorf("workers per room must be between 1 and %d", MaxWorkersPerRoom)
 		}
 		if cfg.SecondaryHash != "" {
 			return nil, fmt.Errorf("secondary hash is incompatible with multi-room mode")
@@ -182,8 +190,8 @@ func New(cfg Config) (*Runner, error) {
 			}
 		}
 		cfg.Workers = cfg.WorkersPerRoom * len(cfg.VKHashes)
-		if cfg.Workers > maxMultiRoomWorkers {
-			return nil, fmt.Errorf("multi-room worker total exceeds %d", maxMultiRoomWorkers)
+		if cfg.Workers > MaxMultiRoomWorkers {
+			return nil, fmt.Errorf("multi-room worker total exceeds %d", MaxMultiRoomWorkers)
 		}
 	} else {
 		if len(cfg.PreloadedCredsByHash) > 0 {
@@ -202,6 +210,7 @@ func New(cfg Config) (*Runner, error) {
 		captchaWVSem:    make(chan struct{}, 1),
 		roomCreds:       make(map[string]roomCredentialCacheEntry),
 		roomAuthLocks:   make(map[string]*sync.Mutex),
+		forcedCredsAt:   make(map[string]time.Time),
 	}
 	r.vkAppID.Store(cfg.VKAppID)
 	r.vkAppSecret.Store(cfg.VKAppSecret)
@@ -303,7 +312,7 @@ func (r *Runner) Start(ctx context.Context) error {
 	}()
 	go stats.RunLoop(shutdownCh)
 
-	disp := NewDispatcherWithOptions(runCtx, localConn, stats, r.cfg.BondV2, len(r.cfg.VKHashes), r.cfg.OnEvent)
+	disp := NewDispatcherWithOptions(runCtx, localConn, stats, r.cfg.BondV2, len(r.cfg.VKHashes), r.cfg.WorkerRateBPS, r.cfg.OnEvent)
 	disp.onWorkerCount = r.cfg.OnWorkerCount
 	defer disp.Shutdown()
 

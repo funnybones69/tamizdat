@@ -198,6 +198,93 @@ func TestBondSchedulerLargeRRSmallPinnedFailover(t *testing.T) {
 	}
 }
 
+func TestWorkerTokenBucketPacesBulkAtConfiguredRateAndPrioritizesLatencyDebt(t *testing.T) {
+	now := time.Unix(1, 0)
+	bucket := newWorkerTokenBucket(DefaultWorkerRateBPS, func() time.Time { return now })
+	if !bucket.admit(workerBurstBytes, false) {
+		t.Fatal("full bucket rejected its configured burst")
+	}
+
+	bulkBytes := 0
+	for i := 0; i < 100; i++ {
+		now = now.Add(10 * time.Millisecond)
+		for bucket.admit(50, false) {
+			bulkBytes += 50
+		}
+	}
+	if bulkBytes < 7200 || bulkBytes > 7300 {
+		t.Fatalf("one-second sustained bulk allowance=%d bytes, want about 7250", bulkBytes)
+	}
+
+	debt := newWorkerTokenBucket(DefaultWorkerRateBPS, func() time.Time { return now })
+	if !debt.admit(workerBurstBytes, false) {
+		t.Fatal("failed to drain initial burst")
+	}
+	if !debt.admit(bondSmallPacketMax, true) || !debt.admit(bondSmallPacketMax, true) {
+		t.Fatal("latency traffic was rejected instead of entering debt")
+	}
+	now = now.Add(100 * time.Millisecond)
+	if debt.admit(100, false) {
+		t.Fatal("bulk traffic bypassed outstanding latency debt")
+	}
+	if !debt.admit(bondSmallPacketMax, true) {
+		t.Fatal("latency traffic was rejected while the bucket remained in debt")
+	}
+	now = now.Add(time.Second)
+	if !debt.admit(workerBurstBytes, false) {
+		t.Fatal("bulk traffic did not resume after debt repayment")
+	}
+}
+
+func TestBondSchedulerBulkSpillsToNextWorkerWhenFirstBucketEmpty(t *testing.T) {
+	now := time.Unix(2, 0)
+	first := &WorkerSlot{ID: 1, RoomID: 0, SendCh: make(chan []byte, 1)}
+	second := &WorkerSlot{ID: 2, RoomID: 0, SendCh: make(chan []byte, 1)}
+	first.bucket = newWorkerTokenBucket(DefaultWorkerRateBPS, func() time.Time { return now })
+	second.bucket = newWorkerTokenBucket(DefaultWorkerRateBPS, func() time.Time { return now })
+	if !first.bucket.admit(workerBurstBytes, false) {
+		t.Fatal("failed to drain first worker bucket")
+	}
+
+	s := newBondScheduler(DefaultWorkerRateBPS)
+	w, ok := s.chooseAndSend([]*WorkerSlot{first, second}, []byte("bulk"), bondSmallPacketMax+1)
+	if !ok || w != second {
+		t.Fatalf("bulk spill worker=%v ok=%t, want second worker", w, ok)
+	}
+}
+
+func TestBondDispatcherCountsShaperDropWithoutConsumingSequence(t *testing.T) {
+	now := time.Unix(3, 0)
+	worker := &WorkerSlot{ID: 1, RoomID: 0, SendCh: make(chan []byte, 1)}
+	worker.bucket = newWorkerTokenBucket(DefaultWorkerRateBPS, func() time.Time { return now })
+	if !worker.bucket.admit(workerBurstBytes, false) {
+		t.Fatal("failed to drain worker bucket")
+	}
+	stats := NewStats()
+	d := &Dispatcher{
+		workers:       []*WorkerSlot{worker},
+		stats:         stats,
+		bondSched:     newBondScheduler(DefaultWorkerRateBPS),
+		workerRateBPS: DefaultWorkerRateBPS,
+	}
+	d.dispatchBond(bytes.Repeat([]byte{'x'}, bondSmallPacketMax+1))
+	if got := stats.BondShaperDrops; got != 1 {
+		t.Fatalf("shaper drops=%d want=1", got)
+	}
+	if seq := d.bondBulkSeq.Load(); seq != 0 {
+		t.Fatalf("dropped bulk packet consumed sequence %d", seq)
+	}
+
+	d.dispatchBond([]byte("latency"))
+	frame, err := decodeBondFrame(<-worker.SendCh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.Seq != 1 || frame.Flags != bondFlagLatency {
+		t.Fatalf("first accepted latency frame seq=%d flags=%d, want 1/%d", frame.Seq, frame.Flags, bondFlagLatency)
+	}
+}
+
 func TestBondLatencyLaneUsesIndependentUplinkSequence(t *testing.T) {
 	stats := NewStats()
 	worker := &WorkerSlot{ID: 1, RoomID: 0, SendCh: make(chan []byte, 3)}
@@ -349,7 +436,11 @@ func TestBondFourRoomAsymmetricDelayLossReorders(t *testing.T) {
 	workers := make([]*WorkerSlot, 4)
 	roomPackets := make([]int, 4)
 	for room := range workers {
-		workers[room] = &WorkerSlot{ID: room + 1, RoomID: room, SendCh: make(chan []byte, 64)}
+		worker := &WorkerSlot{ID: room + 1, RoomID: room, SendCh: make(chan []byte, 64)}
+		worker.bucket = newWorkerTokenBucket(DefaultWorkerRateBPS, nil)
+		worker.bucket.burst = 1 << 20
+		worker.bucket.tokens = worker.bucket.burst
+		workers[room] = worker
 	}
 	for seq := 1; seq <= total; seq++ {
 		frame, err := encodeBondFrame(bondFrame{Type: bondFrameData, Seq: uint64(seq), Payload: []byte{byte(seq)}})
@@ -428,7 +519,7 @@ func TestDispatcherShutdownUnblocksReadLoop(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	d := NewDispatcherWithOptions(context.Background(), conn, NewStats(), true, 2, nil)
+	d := NewDispatcherWithOptions(context.Background(), conn, NewStats(), true, 2, DefaultWorkerRateBPS, nil)
 	done := make(chan struct{})
 	go func() {
 		d.Shutdown()

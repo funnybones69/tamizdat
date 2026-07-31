@@ -32,11 +32,16 @@ func TestBuildWorkerGroupPlansFourRoomsTwentyEach(t *testing.T) {
 	}
 }
 
-func TestBuildWorkerGroupPlansSingleRoomKeepsLegacyBatching(t *testing.T) {
+func TestBuildWorkerGroupPlansSingleRoomRollsOneAtATime(t *testing.T) {
 	plans := buildWorkerGroupPlans(20, 1, 20)
-	want := []workerGroupPlan{{hashIndex: 0, roomID: 0, workerCount: 12}, {hashIndex: 0, roomID: 0, workerCount: 8}}
-	if !reflect.DeepEqual(plans, want) {
-		t.Fatalf("plans=%v want=%v", plans, want)
+	if len(plans) != 20 {
+		t.Fatalf("groups=%d want=20", len(plans))
+	}
+	for i, plan := range plans {
+		want := workerGroupPlan{hashIndex: 0, roomID: 0, workerCount: 1}
+		if plan != want {
+			t.Fatalf("plan[%d]=%v want=%v", i, plan, want)
+		}
 	}
 }
 
@@ -89,6 +94,21 @@ func TestPreloadedRoomCredentialsAndLiveUpdateStayScoped(t *testing.T) {
 	}
 	if err := r.UpdatePreloadedCredsByHash(map[string]*Credentials{"unknown": a}); err == nil {
 		t.Fatal("accepted credentials for an unconfigured room")
+	}
+}
+
+func TestNewSupportsSixRoomsAtTwentyWorkers(t *testing.T) {
+	rooms := []string{"a", "b", "c", "d", "e", "f"}
+	r, err := New(Config{PeerAddr: "127.0.0.1:443", WorkersPerRoom: MaxWorkersPerRoom, VKHashes: rooms})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.cfg.Workers != MaxMultiRoomWorkers {
+		t.Fatalf("workers=%d want=%d", r.cfg.Workers, MaxMultiRoomWorkers)
+	}
+	plans := buildWorkerGroupPlans(r.cfg.Workers, len(rooms), r.cfg.WorkersPerRoom)
+	if len(plans) != MaxMultiRoomWorkers {
+		t.Fatalf("plans=%d want=%d", len(plans), MaxMultiRoomWorkers)
 	}
 }
 

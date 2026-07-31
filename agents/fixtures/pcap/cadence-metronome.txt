@@ -1,0 +1,18 @@
+# frame.time_epoch event
+0.000 ping
+10.000 ping
+20.000 ping
+30.000 ping
+40.000 ping
+50.000 ping
+0.000 ack
+1.000 ack
+2.000 ack
+3.000 ack
+4.000 ack
+5.000 ack
+0.000 rebind
+60.000 rebind
+120.000 rebind
+180.000 rebind
+240.000 rebind

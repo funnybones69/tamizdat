@@ -18,6 +18,7 @@ type Stats struct {
 	BondBytesUp                 int64
 	BondBytesDown               int64
 	BondQueueDrops              int64
+	BondShaperDrops             int64
 	BondReorderGaps             int64
 	BondReorderLate             int64
 	BondReorderDuplicates       int64
@@ -27,15 +28,15 @@ type Stats struct {
 	BondLatencyFramesDown       int64
 	BondRoomsConfigured         int32
 	BondWorkersRequestedPerRoom int32
-	BondWorkersActive           [maxRooms]int32
-	BondRoomPackets             [maxRooms]int64
-	BondRoomBytes               [maxRooms]int64
-	BondRoomDrops               [maxRooms]int64
-	BondRoomRXPackets           [maxRooms]int64
-	BondRoomRXBytes             [maxRooms]int64
-	BondRoomCredentialErrors    [maxRooms]int64
-	BondRoomSessionErrors       [maxRooms]int64
-	BondRoomQuotaErrors         [maxRooms]int64
+	BondWorkersActive           [MaxRooms]int32
+	BondRoomPackets             [MaxRooms]int64
+	BondRoomBytes               [MaxRooms]int64
+	BondRoomDrops               [MaxRooms]int64
+	BondRoomRXPackets           [MaxRooms]int64
+	BondRoomRXBytes             [MaxRooms]int64
+	BondRoomCredentialErrors    [MaxRooms]int64
+	BondRoomSessionErrors       [MaxRooms]int64
+	BondRoomQuotaErrors         [MaxRooms]int64
 }
 
 func NewStats() *Stats {
@@ -80,11 +81,11 @@ func (s *Stats) RunLoop(shutdown <-chan struct{}) {
 					roomSessionErrors[i] = atomic.LoadInt64(&s.BondRoomSessionErrors[i])
 					roomQuotaErrors[i] = atomic.LoadInt64(&s.BondRoomQuotaErrors[i])
 				}
-				log.Printf("[BOND] bond_v2_active=1 rooms_configured=%d workers_requested_per_room=%d workers_active_per_room=%v frames_up=%d frames_down=%d latency_frames_up=%d latency_frames_down=%d bytes_up=%d bytes_down=%d queue_drops=%d reorder_gaps=%d late=%d duplicates=%d invalid_frames=%d negotiation_failures=%d room_tx_packets=%v room_tx_bytes=%v room_rx_packets=%v room_rx_bytes=%v room_drops=%v room_credential_errors=%v room_session_errors=%v room_quota_errors=%v",
+				log.Printf("[BOND] bond_v2_active=1 rooms_configured=%d workers_requested_per_room=%d workers_active_per_room=%v frames_up=%d frames_down=%d latency_frames_up=%d latency_frames_down=%d bytes_up=%d bytes_down=%d queue_drops=%d shaper_drops=%d reorder_gaps=%d late=%d duplicates=%d invalid_frames=%d negotiation_failures=%d room_tx_packets=%v room_tx_bytes=%v room_rx_packets=%v room_rx_bytes=%v room_drops=%v room_credential_errors=%v room_session_errors=%v room_quota_errors=%v",
 					atomic.LoadInt32(&s.BondRoomsConfigured), atomic.LoadInt32(&s.BondWorkersRequestedPerRoom), workersActive,
 					bondUp, bondDown, atomic.LoadInt64(&s.BondLatencyFramesUp), atomic.LoadInt64(&s.BondLatencyFramesDown),
 					atomic.LoadInt64(&s.BondBytesUp), atomic.LoadInt64(&s.BondBytesDown),
-					atomic.LoadInt64(&s.BondQueueDrops), atomic.LoadInt64(&s.BondReorderGaps), atomic.LoadInt64(&s.BondReorderLate),
+					atomic.LoadInt64(&s.BondQueueDrops), atomic.LoadInt64(&s.BondShaperDrops), atomic.LoadInt64(&s.BondReorderGaps), atomic.LoadInt64(&s.BondReorderLate),
 					atomic.LoadInt64(&s.BondReorderDuplicates), atomic.LoadInt64(&s.BondInvalidFrames), atomic.LoadInt64(&s.BondNegotiationFailures),
 					roomPackets, roomBytes, roomRXPackets, roomRXBytes, roomDrops,
 					roomCredentialErrors, roomSessionErrors, roomQuotaErrors)

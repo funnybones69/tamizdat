@@ -13,34 +13,115 @@ import (
 )
 
 const (
-	workersPerGroup    = 12
-	multiRoomGroupSize = 1
-	defaultCycleSecs   = 36000
-	quotaStartupGrace  = 15 * time.Second
-	quotaRetryInitial  = 5 * time.Second
-	quotaRetryMaximum  = 1 * time.Minute
+	workersPerGroup         = 12
+	multiRoomGroupSize      = 1
+	defaultCycleSecs        = 36000
+	quotaRetryInitial       = 5 * time.Second
+	quotaRetryMaximum       = 1 * time.Minute
+	rotationSafetySeconds   = 120
+	rotationOffsetStep      = 10 * time.Second
+	rotationOffsetCap       = 60 * time.Second
+	rotationMinimumInterval = 60 * time.Second
+	workerStopTimeout       = 10 * time.Second
+	workerRecoveryTimeout   = 15 * time.Second
+	workerRecoveryPoll      = 250 * time.Millisecond
+	workerRecoveryFallback  = 2500 * time.Millisecond
+	credentialRetryDelay    = 30 * time.Second
 )
 
-func credentialCycleSeconds(lifetime, stagger int) int {
-	if lifetime <= 0 {
-		return defaultCycleSecs
+func rotationOffset(groupID int) time.Duration {
+	if groupID <= 0 {
+		return 0
 	}
-	safety := 120
+	offset := time.Duration(groupID) * rotationOffsetStep
+	if offset > rotationOffsetCap {
+		return rotationOffsetCap
+	}
+	return offset
+}
+
+func rotationSleepDuration(lifetime, groupID int) time.Duration {
+	if lifetime <= 0 {
+		lifetime = defaultCycleSecs
+	}
+	safety := rotationSafetySeconds
 	if lifetime <= 240 {
 		safety = 30
 	}
 	if lifetime <= 60 {
 		safety = 5
 	}
-	seconds := lifetime - safety + stagger
-	maxSeconds := lifetime - 5
-	if seconds > maxSeconds {
-		seconds = maxSeconds
+	delay := time.Duration(lifetime-safety)*time.Second - rotationOffset(groupID)
+	if delay < rotationMinimumInterval {
+		return rotationMinimumInterval
 	}
-	if seconds < 5 {
-		seconds = 5
+	return delay
+}
+
+func doneChannelsClosed(channels []chan struct{}) bool {
+	for _, ch := range channels {
+		select {
+		case <-ch:
+		default:
+			return false
+		}
 	}
-	return seconds
+	return true
+}
+
+func waitDoneChannels(ctx context.Context, channels []chan struct{}, timeout time.Duration) bool {
+	if doneChannelsClosed(channels) {
+		return true
+	}
+	timer := time.NewTimer(timeout)
+	ticker := time.NewTicker(workerRecoveryPoll)
+	defer timer.Stop()
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if doneChannelsClosed(channels) {
+				return true
+			}
+		case <-timer.C:
+			return doneChannelsClosed(channels)
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
+
+func waitWorkerRecovery(ctx context.Context, d *Dispatcher, workerIDs map[int]struct{}, requiredID, target int) bool {
+	ready := func() bool {
+		count, requiredActive := d.workerGroupState(workerIDs, requiredID)
+		return requiredActive && count >= target
+	}
+	if ready() {
+		return true
+	}
+	timer := time.NewTimer(workerRecoveryTimeout)
+	ticker := time.NewTicker(workerRecoveryPoll)
+	defer timer.Stop()
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if ready() {
+				return true
+			}
+		case <-timer.C:
+			fallback := time.NewTimer(workerRecoveryFallback)
+			defer fallback.Stop()
+			select {
+			case <-fallback.C:
+				return ready()
+			case <-ctx.Done():
+				return false
+			}
+		case <-ctx.Done():
+			return false
+		}
+	}
 }
 
 func nextQuotaRetryDelay(current time.Duration) time.Duration {
@@ -138,26 +219,31 @@ func (r *Runner) workerGroup(
 
 	cycleNumber := 0
 	quotaRetryDelay := quotaRetryInitial
+	workerIDSet := make(map[int]struct{}, len(workerIDs))
+	for _, wid := range workerIDs {
+		workerIDSet[wid] = struct{}{}
+	}
 
 	// Предыдущий батч
 	var prevCancel context.CancelFunc
 	var prevDoneChs []chan struct{}
 	var commonSignalOnce sync.Once
+	var forcedPrevious *Credentials
+	recoveryReplacement := false
 
-	killBatch := func() {
+	killBatch := func() bool {
 		if prevCancel != nil {
 			prevCancel()
-			for _, ch := range prevDoneChs {
-				select {
-				case <-ch:
-				case <-time.After(3 * time.Second):
-				}
+			if !waitDoneChannels(ctx, prevDoneChs, workerStopTimeout) {
+				log.Printf("[ГРУППА #%d] Таймаут остановки batch; замена не запускается", groupID)
+				return false
 			}
 			prevCancel = nil
 			prevDoneChs = nil
 		}
+		return true
 	}
-	defer killBatch()
+	defer func() { _ = killBatch() }()
 
 	for {
 		if ctx.Err() != nil {
@@ -166,7 +252,9 @@ func (r *Runner) workerGroup(
 
 		// Doze-mode пауза: убиваем воркеров и ждём RESUME
 		if atomic.LoadInt32(pauseFlag) != 0 {
-			killBatch()
+			if !killBatch() {
+				return
+			}
 			log.Printf("[ГРУППА #%d] Пауза (Doze)", groupID)
 			for {
 				if ctx.Err() != nil {
@@ -184,13 +272,22 @@ func (r *Runner) workerGroup(
 		hash := tp.Hashes[hashIndex%len(tp.Hashes)]
 		log.Printf("[ГРУППА #%d] Цикл %d: ожидание очереди получения кредов", groupID, cycleNumber)
 
-		creds, err := func() (*Credentials, error) {
-			authLock := r.credentialLock(hash)
-			authLock.Lock()
-			defer authLock.Unlock()
-			log.Printf("[ГРУППА #%d] Цикл %d: запрос кредов", groupID, cycleNumber)
-			return r.getCredsWithFallback(ctx, tp, hash, stats)
-		}()
+		var creds *Credentials
+		var err error
+		if forcedPrevious != nil {
+			creds, err = r.refreshCredentialsForGeneration(ctx, tp, hash, forcedPrevious, stats)
+			if err == nil {
+				forcedPrevious = nil
+			}
+		} else {
+			creds, err = func() (*Credentials, error) {
+				authLock := r.credentialLock(hash)
+				authLock.Lock()
+				defer authLock.Unlock()
+				log.Printf("[ГРУППА #%d] Цикл %d: запрос кредов", groupID, cycleNumber)
+				return r.getCredsWithFallback(ctx, tp, hash, stats)
+			}()
+		}
 
 		if err != nil {
 			if ctx.Err() != nil {
@@ -201,43 +298,39 @@ func (r *Runner) workerGroup(
 			}
 			log.Printf("[ГРУППА #%d] Ошибка кредов: %v", groupID, err)
 			select {
-			case <-time.After(30 * time.Second):
+			case <-time.After(credentialRetryDelay):
 			case <-ctx.Done():
 				return
 			}
 			continue
 		}
 
-		// Вычисляем точное время жизни на основе ответа VK (минус 2 минуты для надёжности)
-		stagger := 0
-		if bondV2 && len(workerIDs) == 1 {
-			// Multi-room uses one lifecycle group per allocation.  Groups start two
-			// seconds apart and retain the same spacing on every credential cycle,
-			// so a rotation retires at most one worker per room instead of all 80.
-			stagger = ((workerIDs[0] - 1) % 20) * 2
-		}
-		sleepDuration := credentialCycleSeconds(creds.Lifetime, stagger)
-		cycleDurationLocal := time.Duration(sleepDuration) * time.Second
+		// Group offsets spread refresh load; the period is never below 60s.
+		cycleDurationLocal := rotationSleepDuration(creds.Lifetime, groupID)
 
 		workerCount := len(workerIDs)
 		if workerCount <= 0 {
 			workerCount = workersPerGroup
 		}
-		log.Printf("[ГРУППА #%d] Запуск %d потоков (до смены кредов: %d сек)", groupID, workerCount, sleepDuration)
+		log.Printf("[ГРУППА #%d] Запуск %d потоков (до смены кредов: %v)", groupID, workerCount, cycleDurationLocal)
 
 		log.Printf("[ГРУППА #%d] Креды OK, TURN urls=%d, %d воркеров", groupID, len(creds.TurnURLs), len(workerIDs))
 
 		// ТЕПЕРЬ убиваем старый батч (креды уже готовы — минимальный простой)
-		killBatch()
+		rollingReplacement := prevCancel != nil || recoveryReplacement
+		if !killBatch() {
+			return
+		}
 
 		// Создаём новый batch
 		batchCtx, batchCancel := context.WithCancel(ctx)
 
 		refreshCh := make(chan struct{}, 1)
-		quotaBackoffCh := make(chan string, 1)
+		quotaBackoffCh := make(chan *Credentials, 1)
 		doneChs := make([]chan struct{}, len(workerIDs))
 		var quotaErrorWorkers sync.Map
 		var notFoundErrorWorkers sync.Map
+		var quotaBackoffOnce sync.Once
 
 		// Сигнализируем следующей группе, что мы успешно запустились (креды получены + 2 сек форы)
 		go func() {
@@ -282,8 +375,9 @@ func (r *Runner) workerGroup(
 						cc = broker.channel()
 					}
 
+					attemptCreds := r.credentialsForAttempt(hash, creds)
 					configDelivered, sessErr := RunSession(batchCtx, tp, peer, d, localPort, useUDP,
-						getConf, cc, wid, creds, deviceID, password, stats, dialer, r.cfg.OnEvent,
+						getConf, cc, wid, attemptCreds, deviceID, password, stats, dialer, r.cfg.OnEvent,
 						memoryProfileForWorkers(r.cfg.Workers), bondV2, bondID, roomID)
 
 					if getConf {
@@ -352,21 +446,23 @@ func (r *Runner) workerGroup(
 								threshold = 5
 							}
 							log.Printf("[ВОРКЕР #%d] Ошибка квоты TURN: %s", wid, errStr)
-							attached := broker != nil && broker.sent.Load()
-							if !attached && qCount >= threshold {
-								log.Printf("[ГРУППА #%d] TURN quota у %d/%d воркеров до GETCONF; backoff без hammer", groupID, qCount, len(workerIDs))
-								select {
-								case quotaBackoffCh <- errStr:
-								default:
-								}
+							if qCount >= threshold {
+								quotaBackoffOnce.Do(func() {
+									phase := "до GETCONF"
+									if broker != nil && broker.sent.Load() {
+										phase = "после GETCONF/attach"
+									}
+									log.Printf("[ГРУППА #%d] TURN quota у %d/%d воркеров %s; обновление поколения без hammer", groupID, qCount, len(workerIDs), phase)
+									if r.cfg.OnQuota != nil {
+										r.cfg.OnQuota(errStr)
+									}
+									quotaBackoffCh <- cloneCredentials(attemptCreds)
+								})
 								return
 							}
 
-							// A quota error is local to this allocation.  Once any worker has
-							// delivered GETCONF, preserve the live Bond and retry only the
-							// missing worker.  This lets a 4x20 pool converge back to 80/80
-							// instead of permanently losing every worker that hit a stale VK
-							// allocation during a process or server restart.
+							// A partial quota error is local to one allocation. Preserve the
+							// rest of the batch and retry only this worker.
 							retryDelay := workerQuotaDelay + time.Duration(rand.Intn(3000))*time.Millisecond
 							workerQuotaDelay = nextQuotaRetryDelay(workerQuotaDelay)
 							log.Printf("[ВОРКЕР #%d] TURN quota: локальный повтор через %v без ротации рабочего batch", wid, retryDelay)
@@ -434,79 +530,47 @@ func (r *Runner) workerGroup(
 		// Сохраняем батч для бесшовной ротации
 		prevCancel = batchCancel
 		prevDoneChs = doneChs
+		if rollingReplacement {
+			for _, wid := range workerIDs {
+				if !waitWorkerRecovery(ctx, d, workerIDSet, wid, len(workerIDs)) {
+					count, _ := d.workerGroupState(workerIDSet, wid)
+					log.Printf("[ГРУППА #%d] Воркер #%d не восстановился за %v + %v (активно %d/%d), продолжаем", groupID, wid, workerRecoveryTimeout, workerRecoveryFallback, count, len(workerIDs))
+					break
+				}
+			}
+		}
+		recoveryReplacement = false
 
 		// Ждём TTL либо сигнала досрочной ротации
 		select {
 		case <-time.After(cycleDurationLocal):
 			log.Printf("[ГРУППА #%d] TTL %v истёк, ротация", groupID, cycleDurationLocal)
+			forcedPrevious = cloneCredentials(creds)
 		case <-refreshCh:
 			log.Printf("[ГРУППА #%d] Вызвана досрочная ротация (креды не отвечали)", groupID)
-		case quotaReason := <-quotaBackoffCh:
-			// Quota failures arrive faster than successful TURN handshakes.  The
-			// old implementation killed the whole batch after the first five
-			// failures, which also destroyed workers that still had a chance to
-			// attach.  Give the batch enough time to deliver GETCONF and preserve
-			// every usable worker when it does.
-			log.Printf("[ГРУППА #%d] TURN quota до GETCONF: ждём успешный канал до %v", groupID, quotaStartupGrace)
-			graceTimer := time.NewTimer(quotaStartupGrace)
-			poll := time.NewTicker(250 * time.Millisecond)
-			attached := broker != nil && broker.sent.Load()
-		waitForAttach:
-			for !attached {
-				select {
-				case <-poll.C:
-					attached = broker != nil && broker.sent.Load()
-				case <-graceTimer.C:
-					break waitForAttach
-				case <-ctx.Done():
-					poll.Stop()
-					if !graceTimer.Stop() {
-						select {
-						case <-graceTimer.C:
-						default:
-						}
-					}
-					return
-				}
+			forcedPrevious = cloneCredentials(creds)
+		case quotaCreds := <-quotaBackoffCh:
+			log.Printf("[ГРУППА #%d] TURN 486: останавливаем старое поколение и запрашиваем новое", groupID)
+			if !killBatch() {
+				return
 			}
-			poll.Stop()
-			if !graceTimer.Stop() {
+			for {
+				_, refreshErr := r.refreshCredentialsForGeneration(ctx, tp, hash, quotaCreds, stats)
+				if refreshErr == nil {
+					quotaRetryDelay = quotaRetryInitial
+					recoveryReplacement = true
+					break
+				}
+				if bondV2 && roomID >= 0 && roomID < len(stats.BondRoomCredentialErrors) {
+					atomic.AddInt64(&stats.BondRoomCredentialErrors[roomID], 1)
+				}
+				log.Printf("[ГРУППА #%d] Новое поколение кредов пока недоступно; повтор через %v", groupID, quotaRetryDelay)
+				timer := time.NewTimer(quotaRetryDelay)
 				select {
-				case <-graceTimer.C:
-				default:
-				}
-			}
-			// A successful GETCONF may race with the grace timer firing.
-			attached = broker != nil && broker.sent.Load()
-
-			if attached {
-				quotaRetryDelay = quotaRetryInitial
-				if r.cfg.OnQuota != nil {
-					r.cfg.OnQuota(quotaReason)
-				}
-				log.Printf("[ГРУППА #%d] TURN quota частичная: сохраняем рабочий batch без разрыва туннеля", groupID)
-				select {
-				case <-time.After(cycleDurationLocal):
-					log.Printf("[ГРУППА #%d] TTL %v истёк после частичной квоты, ротация", groupID, cycleDurationLocal)
-				case <-refreshCh:
-					log.Printf("[ГРУППА #%d] Досрочная ротация после частичной квоты", groupID)
-				case <-ctx.Done():
-					return
-				}
-			} else {
-				if r.cfg.OnQuota != nil {
-					r.cfg.OnQuota(quotaReason)
-				}
-				log.Printf("[ГРУППА #%d] TURN quota полная: повтор через %v без фиксированной 10-минутной паузы", groupID, quotaRetryDelay)
-				killBatch()
-				// Do not retry a room-scoped cached credential batch forever. The
-				// next cycle must obtain fresh TURN material so a stale allocation
-				// quota cannot strand this room at zero workers.
-				r.invalidateRoomCreds(hash)
-				select {
-				case <-time.After(quotaRetryDelay):
+				case <-timer.C:
 					quotaRetryDelay = nextQuotaRetryDelay(quotaRetryDelay)
 				case <-ctx.Done():
+					timer.Stop()
 					return
 				}
 			}

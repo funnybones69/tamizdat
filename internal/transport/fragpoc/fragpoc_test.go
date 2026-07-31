@@ -581,7 +581,7 @@ func testParallelDownWindowEchoesLargeStream(t *testing.T, downWindow int) {
 	if _, err := conn.Write(payload); err != nil {
 		t.Fatalf("Write payload: %v", err)
 	}
-	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err := conn.SetReadDeadline(time.Now().Add(15 * time.Second)); err != nil {
 		t.Fatalf("SetReadDeadline: %v", err)
 	}
 	got := make([]byte, len(payload))

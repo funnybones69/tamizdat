@@ -28,8 +28,8 @@ const (
 	bondSmallPacketMax     = 384
 	bondWorkerQueue        = 128
 	bondWGQueue            = 512
-	bondMaxRooms           = 4
-	bondMaxWorkers         = 80
+	bondMaxRooms           = 6
+	bondMaxWorkers         = 120
 	bondBindMaxAttempts    = 8
 	bondCleanupGrace       = 10 * time.Second
 	bondMaxRunsPerDevice   = 1

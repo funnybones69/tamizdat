@@ -24,20 +24,24 @@ func TestNextQuotaRetryDelay(t *testing.T) {
 	}
 }
 
-func TestCredentialCycleSeconds(t *testing.T) {
+func TestRotationSleepDuration(t *testing.T) {
 	for _, tc := range []struct {
 		lifetime int
-		stagger  int
-		want     int
+		groupID  int
+		want     time.Duration
 	}{
-		{lifetime: 600, stagger: 0, want: 480},
-		{lifetime: 600, stagger: 38, want: 518},
-		{lifetime: 180, stagger: 20, want: 170},
-		{lifetime: 30, stagger: 20, want: 25},
-		{lifetime: 0, stagger: 0, want: defaultCycleSecs},
+		{lifetime: 600, groupID: 1, want: 470 * time.Second},
+		{lifetime: 600, groupID: 2, want: 460 * time.Second},
+		{lifetime: 600, groupID: 99, want: 420 * time.Second},
+		{lifetime: 180, groupID: 1, want: 140 * time.Second},
+		{lifetime: 30, groupID: 1, want: rotationMinimumInterval},
+		{lifetime: 0, groupID: 1, want: (defaultCycleSecs-rotationSafetySeconds)*time.Second - rotationOffsetStep},
 	} {
-		if got := credentialCycleSeconds(tc.lifetime, tc.stagger); got != tc.want {
-			t.Fatalf("credentialCycleSeconds(%d, %d)=%d want=%d", tc.lifetime, tc.stagger, got, tc.want)
+		if got := rotationSleepDuration(tc.lifetime, tc.groupID); got != tc.want {
+			t.Fatalf("rotationSleepDuration(%d, %d)=%v want=%v", tc.lifetime, tc.groupID, got, tc.want)
 		}
+	}
+	if got := rotationOffset(999); got != rotationOffsetCap {
+		t.Fatalf("rotation offset cap=%v want=%v", got, rotationOffsetCap)
 	}
 }

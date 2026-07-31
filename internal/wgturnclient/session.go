@@ -35,7 +35,7 @@ type sessionMemoryProfile struct {
 }
 
 func memoryProfileForWorkers(workers int) sessionMemoryProfile {
-	if workers > maxWorkersPerRoom {
+	if workers > MaxWorkersPerRoom {
 		return sessionMemoryProfile{
 			socketBufferSize: multiRoomSocketBufSize,
 			workerSendBuffer: multiRoomWorkerSendBuf,

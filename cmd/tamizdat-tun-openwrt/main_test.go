@@ -22,13 +22,42 @@ func TestOpenWrtInitFlagContract(t *testing.T) {
 	help := stderr.String()
 	for _, name := range []string{
 		"server", "tun-name", "tun-mtu", "vk-hash-file",
-		"vk-workers-per-room", "vk-turn-pass-file", "vk-credential-mode",
+		"vk-workers-per-room", "vk-worker-rate-bps", "vk-turn-pass-file", "vk-credential-mode",
 		"vk-captcha-mode", "vk-captcha-dir", "vk-captcha-wait",
 		"vk-creds-cache", "vk-credential-helper", "vk-profile-uri-file",
 		"vk-credential-helper-dir", "pidfile", "debug",
 	} {
 		if !strings.Contains(help, "-"+name) {
 			t.Errorf("OpenWrt init flag -%s is missing from help", name)
+		}
+	}
+}
+
+func TestEarlyInfoFlagsBypassAllOtherParsing(t *testing.T) {
+	for _, form := range []string{"-capabilities-json", "--capabilities-json", "-capabilities-json=true", "--capabilities-json=true"} {
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"-not-a-real-flag", form}, &stdout, &stderr); code != 0 {
+			t.Fatalf("%s exit=%d stderr=%q", form, code, stderr.String())
+		}
+		var info struct {
+			MaxRooms          int `json:"max_rooms"`
+			MaxWorkersPerRoom int `json:"max_workers_per_room"`
+			MaxWorkersTotal   int `json:"max_workers_total"`
+		}
+		if err := json.Unmarshal(stdout.Bytes(), &info); err != nil {
+			t.Fatalf("%s produced invalid JSON: %v (%q)", form, err, stdout.String())
+		}
+		if info.MaxRooms != 6 || info.MaxWorkersPerRoom != 20 || info.MaxWorkersTotal != 120 {
+			t.Fatalf("%s limits=%+v", form, info)
+		}
+	}
+	for _, form := range []string{"-version", "--version", "-version=true", "--version=true"} {
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{form, "-not-a-real-flag"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("%s exit=%d stderr=%q", form, code, stderr.String())
+		}
+		if !strings.HasPrefix(stdout.String(), "tamizdat-tun-linux version=") {
+			t.Fatalf("%s output=%q", form, stdout.String())
 		}
 	}
 }

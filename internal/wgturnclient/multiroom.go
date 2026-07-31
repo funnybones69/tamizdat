@@ -23,12 +23,10 @@ func buildWorkerGroupPlans(totalWorkers, roomCount, workersPerRoom int) []worker
 	}
 	var plans []workerGroupPlan
 	if workersPerRoom > 0 {
-		groupSize := workersPerGroup
-		if roomCount > 1 {
-			// Independent allocation lifecycles prevent a synchronized 4x20
-			// credential rotation from tearing down the entire live Bond.
-			groupSize = multiRoomGroupSize
-		}
+		// Explicit per-room mode is the canonical OpenWrt path. One allocation
+		// per lifecycle group makes every replacement kill-one-add-one for both
+		// single-room and multi-room configurations.
+		groupSize := multiRoomGroupSize
 		for room := 0; room < roomCount; room++ {
 			remaining := workersPerRoom
 			for remaining > 0 {
@@ -136,4 +134,49 @@ func (r *Runner) currentRoomCreds(hash string) *Credentials {
 		dup.Lifetime = remaining
 	}
 	return dup
+}
+
+// credentialsForAttempt reads the latest published generation before every
+// retry. A sibling lifecycle group or external refresher may replace TURN
+// credentials while this worker batch remains alive.
+func (r *Runner) credentialsForAttempt(hash string, fallback *Credentials) *Credentials {
+	if r.cfg.WorkersPerRoom > 0 {
+		if current := r.currentRoomCreds(hash); current != nil {
+			return current
+		}
+	} else if current := r.currentPreloadedCreds(); current != nil {
+		return current
+	}
+	return fallback
+}
+
+func sameCredentialGeneration(a, b *Credentials) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.User == b.User && a.Pass == b.Pass
+}
+
+// invalidateCredentials removes only the generation that received TURN 486.
+// It cannot delete a newer generation already published by a sibling group.
+func (r *Runner) invalidateCredentials(hash string, stale *Credentials) {
+	if r.cfg.WorkersPerRoom > 0 {
+		r.roomCredsMu.Lock()
+		defer r.roomCredsMu.Unlock()
+		entry, ok := r.roomCreds[hash]
+		if !ok || entry.creds == nil || !sameCredentialGeneration(entry.creds, stale) {
+			return
+		}
+		delete(r.roomCreds, hash)
+		return
+	}
+
+	r.preloadedCredsMu.Lock()
+	defer r.preloadedCredsMu.Unlock()
+	current := r.preloadedCreds.Load()
+	if current == nil || !sameCredentialGeneration(current, stale) {
+		return
+	}
+	r.preloadedCreds.Store(nil)
+	r.preloadedCredsExpiry.Store(0)
 }

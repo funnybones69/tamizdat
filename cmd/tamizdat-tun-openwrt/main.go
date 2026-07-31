@@ -22,17 +22,33 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/funnybones69/tamizdat/internal/tunbinaryinfo"
 	"github.com/funnybones69/tamizdat/internal/wgturnclient"
 )
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
 func run(args []string, stdout, stderr io.Writer) int {
+	switch earlyInfoFlag(args) {
+	case "version":
+		fmt.Fprintln(stdout, tunbinaryinfo.VersionLine())
+		return 0
+	case "capabilities-json":
+		if err := json.NewEncoder(stdout).Encode(tunbinaryinfo.Current()); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return 0
+	}
+
 	fs := flag.NewFlagSet("tamizdat-tun-linux", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	_ = fs.Bool("version", false, "print immutable build identity and exit")
+	_ = fs.Bool("capabilities-json", false, "print machine-readable capabilities and exit")
 	server := fs.String("server", "", "wgturn server UDP endpoint host:port")
 	roomsFile := fs.String("vk-hash-file", "", "0600 file with one VK room hash/link per line")
 	workersPerRoom := fs.Int("vk-workers-per-room", 20, "workers per room (1..20; 20 enables the full per-room pool)")
+	workerRateBPS := fs.Int("vk-worker-rate-bps", wgturnclient.DefaultWorkerRateBPS, "per-worker TURN shaper rate in bytes/s")
 	passwordFile := fs.String("vk-turn-pass-file", "", "0600 file containing relay connection password")
 	tunName := fs.String("tun-name", "tamtun0", "Linux TUN interface name")
 	mtu := fs.Int("tun-mtu", 1280, "TUN MTU")
@@ -57,6 +73,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fs.Usage()
 		return 2
 	}
+	if *workersPerRoom < 1 || *workersPerRoom > wgturnclient.MaxWorkersPerRoom {
+		fmt.Fprintf(stderr, "workers per room must be 1..%d\n", wgturnclient.MaxWorkersPerRoom)
+		return 2
+	}
 	if *pidfile != "" {
 		if err := os.WriteFile(*pidfile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0600); err != nil {
 			fmt.Fprintln(stderr, err)
@@ -70,8 +90,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	rooms = wgturnclient.NormalizeVKCallHashes(rooms)
-	if len(rooms) < 1 || len(rooms) > 4 || len(rooms) != len(readLinesForValidation(*roomsFile)) {
-		fmt.Fprintln(stderr, "rooms file must contain 1..4 unique normalized rooms")
+	if len(rooms) < 1 || len(rooms) > wgturnclient.MaxRooms || len(rooms) != len(readLinesForValidation(*roomsFile)) {
+		fmt.Fprintf(stderr, "rooms file must contain 1..%d unique normalized rooms\n", wgturnclient.MaxRooms)
 		return 2
 	}
 	password, err := readPrivateValue(*passwordFile)
@@ -113,8 +133,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	configCh := make(chan string, 1)
 	runner, err := wgturnclient.New(wgturnclient.Config{
 		Listen: *listen, PeerAddr: *server, WorkersPerRoom: *workersPerRoom,
-		BondV2: len(rooms) > 1,
-		UseUDP: true, UseTCP: false, VKHashes: rooms, ConnPassword: password,
+		BondV2:        len(rooms) > 1,
+		WorkerRateBPS: *workerRateBPS,
+		UseUDP:        true, UseTCP: false, VKHashes: rooms, ConnPassword: password,
 		DeviceID: *deviceID, CredentialMode: *credentialMode,
 		CaptchaMode: *captchaMode, CaptchaDir: *captchaDir, CaptchaWait: *captchaWait,
 		PreloadedCredsByHash: preloaded, AcquireRoomCredentials: acquireRoomCredentials,
@@ -188,6 +209,21 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	return 0
+}
+
+// earlyInfoFlag deliberately runs before flag.FlagSet construction/parsing so
+// package managers can inspect a binary even when the remaining invocation
+// contains flags from another release.
+func earlyInfoFlag(args []string) string {
+	for _, arg := range args {
+		switch arg {
+		case "-version", "--version", "-version=true", "--version=true":
+			return "version"
+		case "-capabilities-json", "--capabilities-json", "-capabilities-json=true", "--capabilities-json=true":
+			return "capabilities-json"
+		}
+	}
+	return ""
 }
 
 func configureKernelTUNAddress(tunName string, addresses []netip.Addr) (string, error) {
