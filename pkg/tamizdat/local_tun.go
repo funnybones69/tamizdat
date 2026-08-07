@@ -12,6 +12,7 @@ type LocalTUNConfig struct {
 	BypassPrivate bool
 	BlockQUIC     bool
 	Sniff         bool
+	FailClosed    bool
 }
 
 // LocalTUNConfigs returns panel-managed local users. These users are loaded
@@ -34,6 +35,7 @@ func (s *Server) LocalTUNConfigs() []LocalTUNConfig {
 			TunAddress: user.LocalTunAddress, MTU: user.LocalTunMTU,
 			AutoRoute: user.LocalAutoRoute, BypassPrivate: user.LocalBypassPrivate,
 			BlockQUIC: user.LocalBlockQUIC, Sniff: user.LocalSniff,
+			FailClosed: user.LocalFailClosed,
 		})
 	}
 	return out

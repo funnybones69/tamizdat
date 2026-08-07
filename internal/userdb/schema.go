@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS users (
     local_bypass_private INTEGER NOT NULL DEFAULT 1,
     local_block_quic     INTEGER NOT NULL DEFAULT 1,
     local_sniff          INTEGER NOT NULL DEFAULT 1,
+    local_fail_closed    INTEGER NOT NULL DEFAULT 0,
     epoch_key            TEXT,                         -- DEPRECATED post-2026-05-09 shortid full-B simplification; kept nullable for backward-compat with existing DB rows.
     pool_size            INTEGER,                      -- DEPRECATED: same vintage as epoch_key.
     outbound_tag         TEXT NOT NULL DEFAULT 'direct',
@@ -271,6 +272,11 @@ func EnsureSchema(db *sql.DB) error {
 	if err := migrateUsersV12(ctx, conn); err != nil {
 		return err
 	}
+	// Migration v12 -> v13 makes local-TUN creation race-safe and exposes an
+	// opt-in fail-closed killswitch. Existing users remain fail-open.
+	if err := migrateUsersV13(ctx, conn); err != nil {
+		return err
+	}
 
 	now := time.Now().Unix()
 	if _, err := conn.ExecContext(ctx, `INSERT OR IGNORE INTO outbounds(tag, kind, uri, note, created_at, updated_at) VALUES('direct', 'direct', NULL, 'Direct dial from server IP', ?, ?)`, now, now); err != nil {
@@ -281,7 +287,7 @@ func EnsureSchema(db *sql.DB) error {
 			return err
 		}
 	}
-	if _, err := conn.ExecContext(ctx, `INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', '12')`); err != nil {
+	if _, err := conn.ExecContext(ctx, `INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', '13')`); err != nil {
 		return err
 	}
 	if _, err := conn.ExecContext(ctx, `DELETE FROM settings WHERE key='schema_version'`); err != nil {
@@ -810,6 +816,40 @@ func migrateUsersV12(ctx context.Context, conn interface {
 		if _, err := conn.ExecContext(ctx, col.sql); err != nil {
 			return fmt.Errorf("add users.%s: %w", col.name, err)
 		}
+	}
+	return nil
+}
+
+func migrateUsersV13(ctx context.Context, conn interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}) error {
+	rows, err := conn.QueryContext(ctx, `PRAGMA table_info(users)`)
+	if err != nil {
+		return err
+	}
+	hasFailClosed := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notNull, pk int
+		var dfltValue sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dfltValue, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		hasFailClosed = hasFailClosed || name == "local_fail_closed"
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if !hasFailClosed {
+		if _, err := conn.ExecContext(ctx, `ALTER TABLE users ADD COLUMN local_fail_closed INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("add users.local_fail_closed: %w", err)
+		}
+	}
+	if _, err := conn.ExecContext(ctx, `CREATE UNIQUE INDEX IF NOT EXISTS users_one_local_tun ON users(user_kind) WHERE user_kind='local_tun'`); err != nil {
+		return fmt.Errorf("enforce one local_tun user: %w", err)
 	}
 	return nil
 }

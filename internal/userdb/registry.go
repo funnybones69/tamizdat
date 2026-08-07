@@ -36,6 +36,7 @@ type User struct {
 	LocalBypassPrivate      bool
 	LocalBlockQUIC          bool
 	LocalSniff              bool
+	LocalFailClosed         bool
 	OutboundTag             string
 	PoolSize                int
 	ExpiresAt               int64
@@ -114,7 +115,8 @@ func (r *UserRegistry) Reload(db *sql.DB) error {
 		COALESCE(local_iface, ''), COALESCE(local_tun_name, 'taml0'),
 		COALESCE(local_tun_addr, '198.18.0.1/24'), COALESCE(local_tun_mtu, 1280),
 		COALESCE(local_auto_route, 1), COALESCE(local_bypass_private, 1),
-		COALESCE(local_block_quic, 1), COALESCE(local_sniff, 1), outbound_tag,
+		COALESCE(local_block_quic, 1), COALESCE(local_sniff, 1),
+		COALESCE(local_fail_closed, 0), outbound_tag,
         COALESCE(pool_size, 1), COALESCE(expires_at, 0), COALESCE(bandwidth_cap, 0),
         COALESCE(rate_limit_mbps, 0),
         bytes_up, bytes_down, COALESCE(bytes_reset_at, 0),
@@ -138,8 +140,8 @@ func (r *UserRegistry) Reload(db *sql.DB) error {
 		u := &User{}
 		var notifPending int
 		var turnPending int
-		var localEnabled, localAutoRoute, localBypassPrivate, localBlockQUIC, localSniff int
-		if err := rows.Scan(&u.ID, &u.Name, &u.MasterShortID, &u.Kind, &localEnabled, &u.LocalInterface, &u.LocalTunName, &u.LocalTunAddress, &u.LocalTunMTU, &localAutoRoute, &localBypassPrivate, &localBlockQUIC, &localSniff, &u.OutboundTag, &u.PoolSize, &u.ExpiresAt, &u.BandwidthCap, &u.RateLimitMbps, &u.BytesUp, &u.BytesDown, &u.BytesResetAt, &u.QuotaBaseline, &u.LastSeenAt, &u.H2PeakStreams, &u.H2PeakTCPStreams, &u.H2PeakUDPStreams, &u.H2PeakAt, &u.H2RelayPeakStreams, &u.H2RelayPeakTCPStreams, &u.H2RelayPeakUDPStreams, &u.H2RelayPeakAt, &u.NotificationText, &notifPending, &u.TurnRoomLink, &u.TurnRoomHash, &turnPending, &u.TurnProfileVersion, &u.TurnProfileUpdatedAt); err != nil {
+		var localEnabled, localAutoRoute, localBypassPrivate, localBlockQUIC, localSniff, localFailClosed int
+		if err := rows.Scan(&u.ID, &u.Name, &u.MasterShortID, &u.Kind, &localEnabled, &u.LocalInterface, &u.LocalTunName, &u.LocalTunAddress, &u.LocalTunMTU, &localAutoRoute, &localBypassPrivate, &localBlockQUIC, &localSniff, &localFailClosed, &u.OutboundTag, &u.PoolSize, &u.ExpiresAt, &u.BandwidthCap, &u.RateLimitMbps, &u.BytesUp, &u.BytesDown, &u.BytesResetAt, &u.QuotaBaseline, &u.LastSeenAt, &u.H2PeakStreams, &u.H2PeakTCPStreams, &u.H2PeakUDPStreams, &u.H2PeakAt, &u.H2RelayPeakStreams, &u.H2RelayPeakTCPStreams, &u.H2RelayPeakUDPStreams, &u.H2RelayPeakAt, &u.NotificationText, &notifPending, &u.TurnRoomLink, &u.TurnRoomHash, &turnPending, &u.TurnProfileVersion, &u.TurnProfileUpdatedAt); err != nil {
 			return err
 		}
 		u.NotificationPending = notifPending != 0
@@ -149,6 +151,7 @@ func (r *UserRegistry) Reload(db *sql.DB) error {
 		u.LocalBypassPrivate = localBypassPrivate != 0
 		u.LocalBlockQUIC = localBlockQUIC != 0
 		u.LocalSniff = localSniff != 0
+		u.LocalFailClosed = localFailClosed != 0
 		u.MasterShortID, err = NormalizeShortIDHex(u.MasterShortID)
 		if err != nil {
 			return fmt.Errorf("user %s master_shortid: %w", u.ID, err)

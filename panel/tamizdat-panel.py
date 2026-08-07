@@ -104,6 +104,7 @@ CREATE TABLE IF NOT EXISTS users (
     local_bypass_private INTEGER NOT NULL DEFAULT 1,
     local_block_quic     INTEGER NOT NULL DEFAULT 1,
     local_sniff          INTEGER NOT NULL DEFAULT 1,
+    local_fail_closed    INTEGER NOT NULL DEFAULT 0,
     pool_size            INTEGER,                      -- DEPRECATED: same vintage as epoch_key.
     outbound_tag         TEXT NOT NULL DEFAULT 'direct',
     bytes_up             INTEGER NOT NULL DEFAULT 0,
@@ -480,6 +481,7 @@ def _user_row_to_dict(row, online_count=0, _current_pool_index=-1, active_transp
         "local_bypass_private": bool(row["local_bypass_private"]) if "local_bypass_private" in row.keys() else True,
         "local_block_quic": bool(row["local_block_quic"]) if "local_block_quic" in row.keys() else True,
         "local_sniff": bool(row["local_sniff"]) if "local_sniff" in row.keys() else True,
+        "local_fail_closed": bool(row["local_fail_closed"]) if "local_fail_closed" in row.keys() else False,
         "local_state": "disabled" if not (bool(row["local_enabled"]) if "local_enabled" in row.keys() else False) else "starting",
         "local_error": "",
         "outbound_tag": row["outbound_tag"],
@@ -838,6 +840,7 @@ def _local_tun_values(body, current=None):
     bypass_private = _as_bool(pick("local_bypass_private", True), True)
     block_quic = _as_bool(pick("local_block_quic", True), True)
     sniff_enabled = _as_bool(pick("local_sniff", True), True)
+    fail_closed = _as_bool(pick("local_fail_closed", False), False)
 
     if iface and not _LOCAL_IFACE_RE.fullmatch(iface):
         raise ValueError("local_iface must be a Linux interface name")
@@ -860,6 +863,7 @@ def _local_tun_values(body, current=None):
         "local_tun_name": tun_name, "local_tun_addr": str(parsed), "local_tun_mtu": mtu,
         "local_auto_route": int(auto_route), "local_bypass_private": int(bypass_private),
         "local_block_quic": int(block_quic), "local_sniff": int(sniff_enabled),
+        "local_fail_closed": int(fail_closed),
     }
 
 
@@ -989,20 +993,25 @@ def create_user(body):
         master = _new_unique_master_shortid(con)
         uid = secrets.token_hex(8)
         now = int(time.time())
-        con.execute("""INSERT INTO users(
+        try:
+            con.execute("""INSERT INTO users(
             id, name, master_shortid, user_kind, pool_size, outbound_tag,
             expires_at, bandwidth_cap, rate_limit_mbps,
             local_enabled, local_iface, local_tun_name, local_tun_addr, local_tun_mtu,
-            local_auto_route, local_bypass_private, local_block_quic, local_sniff,
+            local_auto_route, local_bypass_private, local_block_quic, local_sniff, local_fail_closed,
             created_at, updated_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
                 uid, name, master, kind, pool_size, outbound,
                 expires_at, bandwidth_cap, rate_limit_mbps,
                 local["local_enabled"], local["local_iface"], local["local_tun_name"],
                 local["local_tun_addr"], local["local_tun_mtu"], local["local_auto_route"],
                 local["local_bypass_private"], local["local_block_quic"], local["local_sniff"],
-                now, now,
+                local["local_fail_closed"], now, now,
             ))
+        except sqlite3.IntegrityError as exc:
+            if kind == "local_tun" and "users.user_kind" in str(exc):
+                raise ValueError("only one local TUN user is supported") from exc
+            raise
     _sighup_server()
     return get_user(uid)
 
@@ -1043,7 +1052,7 @@ def update_user(user_id, body):
 
     local_keys = {
         "local_enabled", "local_iface", "local_tun_name", "local_tun_addr", "local_tun_mtu",
-        "local_auto_route", "local_bypass_private", "local_block_quic", "local_sniff",
+        "local_auto_route", "local_bypass_private", "local_block_quic", "local_sniff", "local_fail_closed",
     }
     touched_local = any(key in body for key in local_keys)
     if kind != "local_tun" and touched_local:
@@ -1052,7 +1061,7 @@ def update_user(user_id, body):
         local = prospective_local
         for key in (
             "local_enabled", "local_iface", "local_tun_name", "local_tun_addr", "local_tun_mtu",
-            "local_auto_route", "local_bypass_private", "local_block_quic", "local_sniff",
+            "local_auto_route", "local_bypass_private", "local_block_quic", "local_sniff", "local_fail_closed",
         ):
             fields.append(f"{key}=?")
             args.append(local[key])
@@ -1897,7 +1906,7 @@ def _migrate_users_turn_profile(con):
 
 
 def _migrate_users_local_tun(con):
-    """v12: panel-managed local TUN/LAN users."""
+    """v13: panel-managed local TUN/LAN users and one-user invariant."""
     cols = {r["name"] for r in con.execute("PRAGMA table_info(users)").fetchall()}
     add = [
         ("user_kind", "ALTER TABLE users ADD COLUMN user_kind TEXT NOT NULL DEFAULT 'remote'"),
@@ -1910,10 +1919,12 @@ def _migrate_users_local_tun(con):
         ("local_bypass_private", "ALTER TABLE users ADD COLUMN local_bypass_private INTEGER NOT NULL DEFAULT 1"),
         ("local_block_quic", "ALTER TABLE users ADD COLUMN local_block_quic INTEGER NOT NULL DEFAULT 1"),
         ("local_sniff", "ALTER TABLE users ADD COLUMN local_sniff INTEGER NOT NULL DEFAULT 1"),
+        ("local_fail_closed", "ALTER TABLE users ADD COLUMN local_fail_closed INTEGER NOT NULL DEFAULT 0"),
     ]
     for name, sql in add:
         if name not in cols:
             con.execute(sql)
+    con.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_one_local_tun ON users(user_kind) WHERE user_kind='local_tun'")
 
 
 def _migrate_user_sessions_transport(con):
@@ -2300,7 +2311,7 @@ def ensure_db():
             for k, v in DEFAULT_SETTINGS.items():
                 con.execute("INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)", (k, v))
             _bootstrap_panel_admin_from_env(con, now)
-            con.execute("INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', '12')")
+            con.execute("INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', '13')")
             con.execute("DELETE FROM settings WHERE key='schema_version'")
             _migrate_legacy_if_needed(con)
             _bootstrap_legacy_shortid(con)
@@ -6341,6 +6352,8 @@ body.nav-open .nav-backdrop{display:block;opacity:1}
       <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="addLocalBypassPrivate" checked style="width:auto"> Keep private/LAN destinations direct</label>
       <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="addLocalBlockQUIC" checked style="width:auto"> Disable QUIC for deterministic domain routing</label>
       <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="addLocalSniff" checked style="width:auto"> Detect TLS SNI / HTTP Host</label>
+      <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="addLocalFailClosed" style="width:auto"> Fail-closed killswitch during dataplane failure</label>
+      <div class="cell-meta">DoH uses normal HTTPS and cannot be intercepted reliably; manage it on clients or block known endpoints separately.</div>
       <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="addLocalEnabled" style="width:auto"> Enable immediately</label>
       <div class="cell-meta">Disabled by default so creating the user cannot interrupt LAN clients.</div>
     </div>
@@ -6411,6 +6424,8 @@ body.nav-open .nav-backdrop{display:block;opacity:1}
       <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="editLocalBypassPrivate" style="width:auto"> Keep private/LAN destinations direct</label>
       <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="editLocalBlockQUIC" style="width:auto"> Disable QUIC for deterministic domain routing</label>
       <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="editLocalSniff" style="width:auto"> Detect TLS SNI / HTTP Host</label>
+      <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="editLocalFailClosed" style="width:auto"> Fail-closed killswitch during dataplane failure</label>
+      <div class="cell-meta">UDP/TCP DNS 53 is redirected and DoT 853 is blocked. DoH cannot be distinguished from HTTPS.</div>
       <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="editLocalEnabled" style="width:auto"> Enabled</label>
     </div>
     <div class="modal-foot">
@@ -7058,6 +7073,7 @@ function openAddUser(){
   gid('addLocalBypassPrivate').checked=true;
   gid('addLocalBlockQUIC').checked=false;
   gid('addLocalSniff').checked=true;
+  gid('addLocalFailClosed').checked=false;
   gid('addLocalEnabled').checked=false;
   toggleAddUserKind();
   gid('addUserModal').classList.add('show');
@@ -7079,7 +7095,8 @@ async function submitAddUser(){
       local_auto_route:gid('addLocalAutoRoute').checked,
       local_bypass_private:gid('addLocalBypassPrivate').checked,
       local_block_quic:gid('addLocalBlockQUIC').checked,
-      local_sniff:gid('addLocalSniff').checked
+      local_sniff:gid('addLocalSniff').checked,
+      local_fail_closed:gid('addLocalFailClosed').checked
     };
   }else{
     const expRaw = gid('addUserExpires').value.trim();
@@ -7167,6 +7184,7 @@ function editUser(uid){
     gid('editLocalBypassPrivate').checked=!!u.local_bypass_private;
     gid('editLocalBlockQUIC').checked=!!u.local_block_quic;
     gid('editLocalSniff').checked=!!u.local_sniff;
+    gid('editLocalFailClosed').checked=!!u.local_fail_closed;
     gid('editLocalEnabled').checked=!!u.local_enabled;
     const state=u.local_state||'disabled';
     const error=u.local_error?(' - '+u.local_error):'';
@@ -7216,7 +7234,8 @@ async function saveEdit(){
       local_auto_route:gid('editLocalAutoRoute').checked,
       local_bypass_private:gid('editLocalBypassPrivate').checked,
       local_block_quic:gid('editLocalBlockQUIC').checked,
-      local_sniff:gid('editLocalSniff').checked
+      local_sniff:gid('editLocalSniff').checked,
+      local_fail_closed:gid('editLocalFailClosed').checked
     };
   }else{
     const expRaw=gid('editExpires').value.trim();

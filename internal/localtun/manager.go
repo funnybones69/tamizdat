@@ -46,6 +46,7 @@ type Config struct {
 	BypassPrivate bool
 	BlockQUIC     bool
 	Sniff         bool
+	FailClosed    bool
 }
 
 func (c Config) normalized() Config {
