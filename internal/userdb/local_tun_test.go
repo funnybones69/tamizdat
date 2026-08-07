@@ -11,13 +11,16 @@ func TestRegistryLoadsLocalUserButDoesNotAuthenticateIt(t *testing.T) {
 	db := openTestDB(t)
 	now := time.Now().Unix()
 	const shortID = "cccccccccccccccc"
+	if _, err := db.Exec(`INSERT INTO outbounds(tag,kind,uri,created_at,updated_at) VALUES('balancer','balancer','{"mode":"alive","outbounds":["direct"]}',?,?)`, now, now); err != nil {
+		t.Fatalf("insert fallback outbound: %v", err)
+	}
 	_, err := db.Exec(`INSERT INTO users(
 		id,name,master_shortid,user_kind,outbound_tag,
 		local_enabled,local_iface,local_tun_name,local_tun_addr,local_tun_mtu,
 		local_auto_route,local_bypass_private,local_block_quic,local_sniff,
 		created_at,updated_at)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		"local-1", "router-lan", shortID, "local_tun", "direct",
+		"local-1", "router-lan", shortID, "local_tun", "balancer",
 		1, "br-lan", "taml0", "198.18.0.1/24", 1280,
 		1, 1, 1, 1, now, now)
 	if err != nil {
@@ -36,6 +39,9 @@ func TestRegistryLoadsLocalUserButDoesNotAuthenticateIt(t *testing.T) {
 	}
 	if u.Kind != "local_tun" || !u.LocalEnabled || u.LocalInterface != "br-lan" {
 		t.Fatalf("local user fields = %+v", u)
+	}
+	if u.OutboundTag != "balancer" {
+		t.Fatalf("local fallback outbound = %q, want balancer", u.OutboundTag)
 	}
 	if !u.LocalAutoRoute || !u.LocalBypassPrivate || !u.LocalBlockQUIC || !u.LocalSniff || u.LocalFailClosed {
 		t.Fatalf("local policy fields = %+v", u)

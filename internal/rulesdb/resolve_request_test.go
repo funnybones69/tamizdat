@@ -38,4 +38,10 @@ func TestResolveRequestPreservesLocalUDPMetadata(t *testing.T) {
 	if got := ResolveRequest(context.Background(), snap, &miss); got != "direct" {
 		t.Fatalf("non-matching source tag = %q, want direct", got)
 	}
+	if got := ResolveMatchedRequest(context.Background(), snap, &miss); got != "" {
+		t.Fatalf("non-matching explicit rule tag = %q, want empty", got)
+	}
+	if got := ResolveMatchedRequest(context.Background(), snap, req); got != "via-h2" {
+		t.Fatalf("matched explicit rule tag = %q, want via-h2", got)
+	}
 }

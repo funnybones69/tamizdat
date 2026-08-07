@@ -69,6 +69,31 @@ func TestDispatcherDefaultOutboundWhenNoRulesMatch(t *testing.T) {
 	}
 }
 
+func TestDispatcherResolveRuleDistinguishesMissFromDefault(t *testing.T) {
+	direct := &stubOutbound{tag: "direct"}
+	via := &stubOutbound{tag: "via"}
+	rules, err := CompileRules([]*Rule{{
+		Domain: []string{"domain:matched.example"}, Outbound: "via",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := NewDispatcher(map[string]Outbound{"direct": direct, "via": via}, rules, "direct", "direct", "AsIs")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if tag, _, matched := d.ResolveRule(context.Background(), &Request{TargetHost: "other.example", TargetPort: 443}); matched || tag != "" {
+		t.Fatalf("ResolveRule miss = (%q, %v), want empty/false", tag, matched)
+	}
+	if tag, outbound := d.Resolve(context.Background(), &Request{TargetHost: "other.example", TargetPort: 443}); tag != "direct" || outbound != direct {
+		t.Fatalf("Resolve fallback = (%q, %T), want direct", tag, outbound)
+	}
+	if tag, outbound, matched := d.ResolveRule(context.Background(), &Request{TargetHost: "matched.example", TargetPort: 443}); !matched || tag != "via" || outbound != via {
+		t.Fatalf("ResolveRule match = (%q, %T, %v), want via/true", tag, outbound, matched)
+	}
+}
+
 func TestDispatcherFallbackToFirstWhenDefaultEmpty(t *testing.T) {
 	a := &stubOutbound{tag: "a"}
 	d, err := NewDispatcher(map[string]Outbound{"a": a},

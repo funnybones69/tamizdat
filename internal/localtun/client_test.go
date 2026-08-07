@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -27,6 +28,26 @@ func localClientRegistry(t *testing.T) (*obreg.Registry, *sql.DB) {
 		t.Fatal(err)
 	}
 	return registry, db
+}
+
+func localClientRules(t *testing.T) *rulesdb.Store {
+	t.Helper()
+	compiled, err := node.CompileRules([]*node.Rule{{
+		Domain: []string{"domain:matched.example"}, Outbound: "sync",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher, err := node.NewDispatcher(
+		map[string]node.Outbound{"direct": nil, "sync": nil},
+		compiled, "direct", "direct", "AsIs",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &rulesdb.Store{}
+	store.Store(&rulesdb.Snapshot{Dispatcher: dispatcher, DefaultTag: "direct"})
+	return store
 }
 
 type testAccounting struct {
@@ -114,6 +135,21 @@ func TestClientTCPThroughDirectOutbound(t *testing.T) {
 	}
 }
 
+func TestClientNoMatchedRuleUsesUserFallbackOutbound(t *testing.T) {
+	client := NewClient(nil, localClientRules(t), nil, "local-1", "router-lan", "balancer", false)
+	request := &node.Request{
+		Network: node.NetworkTCP, TargetHost: "unmatched.example", TargetPort: 443,
+		InboundTag: "local-tun", User: "router-lan",
+	}
+	if got := client.selectOutbound(context.Background(), request); got != "balancer" {
+		t.Fatalf("unmatched local-TUN outbound = %q, want user fallback balancer", got)
+	}
+	request.TargetHost = "matched.example"
+	if got := client.selectOutbound(context.Background(), request); got != "sync" {
+		t.Fatalf("matched local-TUN outbound = %q, want routing rule sync", got)
+	}
+}
+
 func TestClientUDPThroughDirectOutbound(t *testing.T) {
 	server, err := net.ListenPacket("udp4", "127.0.0.1:0")
 	if err != nil {
@@ -167,18 +203,18 @@ func TestClientUDPThroughDirectOutbound(t *testing.T) {
 	}
 }
 
-func TestClientUDPUnknownForcedTagDoesNotDialDirect(t *testing.T) {
+func TestClientUDPUnknownFallbackTagDoesNotDialDirect(t *testing.T) {
 	registry, _ := localClientRegistry(t)
-	client := NewClient(registry, &rulesdb.Store{}, nil, "local-1", "router-lan", "deleted", false)
+	client := NewClient(registry, localClientRules(t), nil, "local-1", "router-lan", "balancer", false)
 	_, err := client.DialPacketRequest(context.Background(), &node.Request{
-		Network: node.NetworkUDP, TargetHost: "127.0.0.1", TargetPort: 9,
+		Network: node.NetworkUDP, TargetHost: "unmatched.example", TargetPort: 9,
 	})
-	if err == nil {
-		t.Fatal("unknown forced UDP outbound unexpectedly succeeded through direct")
+	if err == nil || !strings.Contains(err.Error(), `outbound "balancer" is unavailable`) {
+		t.Fatalf("unknown fallback UDP error = %v, want exact balancer lookup failure", err)
 	}
 }
 
-func TestClientTCPDeletedForcedTagClosesInsteadOfDialingDirect(t *testing.T) {
+func TestClientTCPUnknownFallbackTagClosesInsteadOfDialingDirect(t *testing.T) {
 	registry, _ := localClientRegistry(t)
 	ln, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -193,7 +229,7 @@ func TestClientTCPDeletedForcedTagClosesInsteadOfDialingDirect(t *testing.T) {
 			accepted <- struct{}{}
 		}
 	}()
-	client := NewClient(registry, &rulesdb.Store{}, nil, "local-1", "router-lan", "deleted", false)
+	client := NewClient(registry, localClientRules(t), nil, "local-1", "router-lan", "balancer", false)
 	conn, err := client.DialRequest(context.Background(), &node.Request{
 		Network: node.NetworkTCP, TargetHost: "127.0.0.1", TargetPort: ln.Addr().(*net.TCPAddr).Port,
 	})
@@ -205,11 +241,11 @@ func TestClientTCPDeletedForcedTagClosesInsteadOfDialingDirect(t *testing.T) {
 	_, _ = conn.Write([]byte("must-not-go-direct"))
 	buf := make([]byte, 1)
 	if _, err := conn.Read(buf); err == nil {
-		t.Fatal("unknown forced TCP outbound remained open")
+		t.Fatal("unknown fallback TCP outbound remained open")
 	}
 	select {
 	case <-accepted:
-		t.Fatal("unknown forced TCP outbound reached direct listener")
+		t.Fatal("unknown fallback TCP outbound reached direct listener")
 	case <-time.After(350 * time.Millisecond):
 	}
 }

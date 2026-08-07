@@ -38,6 +38,7 @@ type Config struct {
 	UserName      string
 	Enabled       bool
 	OutboundTag   string
+	FallbackTag   string
 	Policy        *rulesdb.Snapshot
 	Interface     string
 	TunName       string
@@ -54,6 +55,10 @@ func (c Config) normalized() Config {
 	c.UserID = strings.TrimSpace(c.UserID)
 	c.UserName = strings.TrimSpace(c.UserName)
 	c.OutboundTag = strings.TrimSpace(c.OutboundTag)
+	c.FallbackTag = strings.TrimSpace(c.FallbackTag)
+	if c.FallbackTag == "" {
+		c.FallbackTag = "direct"
+	}
 	c.Interface = strings.TrimSpace(c.Interface)
 	c.TunName = strings.TrimSpace(c.TunName)
 	c.TunAddress = strings.TrimSpace(c.TunAddress)
@@ -94,6 +99,25 @@ func validateConfig(c Config) error {
 	return nil
 }
 
+func prepareEnabledConfig(c *Config) error {
+	if err := validateConfig(*c); err != nil {
+		return err
+	}
+	tunnelTag, err := localTunnelOutbound(c.Policy, c.UserName)
+	if err != nil {
+		return err
+	}
+	if tunnelTag == "" {
+		fallback := strings.TrimSpace(c.FallbackTag)
+		if fallback == "" || fallback == "direct" || fallback == "block" {
+			return errors.New("local TUN has no tunnel outbound in applicable Routing rules or user fallback")
+		}
+		tunnelTag = fallback
+	}
+	c.OutboundTag = tunnelTag
+	return nil
+}
+
 type Manager struct {
 	mu         sync.Mutex
 	registry   *obreg.Registry
@@ -129,17 +153,9 @@ func (m *Manager) Reconcile(configs []Config) error {
 		selected = &cfg
 	}
 	if selected != nil {
-		if err := validateConfig(*selected); err != nil {
+		if err := prepareEnabledConfig(selected); err != nil {
 			return err
 		}
-		tunnelTag, err := localTunnelOutbound(selected.Policy, selected.UserName)
-		if err != nil {
-			return err
-		}
-		if tunnelTag == "" {
-			return errors.New("local TUN has no tunnel outbound in applicable Routing rules")
-		}
-		selected.OutboundTag = tunnelTag
 	}
 
 	m.mu.Lock()
@@ -264,7 +280,7 @@ func (m *Manager) runOnce(ctx context.Context, generation uint64, cfg Config, st
 	} else if err := routes.Cleanup(ctx); err != nil {
 		return fmt.Errorf("remove stale local TUN generation: %w", err)
 	}
-	client := NewClient(m.registry, m.rules, m.accounting, cfg.UserID, cfg.UserName, cfg.OutboundTag, cfg.Sniff)
+	client := NewClient(m.registry, m.rules, m.accounting, cfg.UserID, cfg.UserName, cfg.FallbackTag, cfg.Sniff)
 	defer client.Close()
 	opts := tunengine.Options{
 		Name:                    cfg.TunName,
@@ -386,6 +402,7 @@ func statusFor(cfg Config, state, errText string, startedAt int64) map[string]an
 		"interface": cfg.Interface, "tun_name": cfg.TunName, "auto_route": cfg.AutoRoute,
 		"fail_closed":  cfg.FailClosed,
 		"outbound_tag": cfg.OutboundTag,
+		"fallback_tag": cfg.FallbackTag,
 		"started_at":   startedAt, "error": errText,
 	}
 }

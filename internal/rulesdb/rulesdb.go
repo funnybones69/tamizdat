@@ -306,6 +306,21 @@ func ResolveRequest(ctx context.Context, snap *Snapshot, req *node.Request) stri
 	return tag
 }
 
+// ResolveMatchedRequest applies only explicit routing rules. It returns an
+// empty tag when no rule matches instead of using Snapshot.DefaultTag. This is
+// intentionally separate from ResolveRequest so remote users retain the
+// dispatcher's normal default-outbound semantics.
+func ResolveMatchedRequest(ctx context.Context, snap *Snapshot, req *node.Request) string {
+	if snap == nil || snap.Dispatcher == nil || req == nil {
+		return ""
+	}
+	tag, _, matched := snap.Dispatcher.ResolveRule(ctx, req)
+	if !matched {
+		return ""
+	}
+	return tag
+}
+
 // Resolve runs the published dispatcher (if any) against a synthetic
 // node.Request and returns the chosen outbound tag. Returns "" when no
 // dispatcher is published so the caller falls back to the registry default.

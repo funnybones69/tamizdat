@@ -67,13 +67,31 @@ func NewDispatcher(outbounds map[string]Outbound, rules []*CompiledRule,
 // IP) and the rules are re-tried with the resolved IP literal in TargetHost.
 // On resolve failure, the request proceeds with the original host.
 func (d *Dispatcher) Resolve(ctx context.Context, req *Request) (string, Outbound) {
+	if tag, outbound, matched := d.ResolveRule(ctx, req); matched {
+		return tag, outbound
+	}
+
+	tag := d.defaultOutbound
+	if tag == "" {
+		tag = d.firstOutboundTag
+	}
+	return tag, d.outbounds[tag]
+}
+
+// ResolveRule returns only an outbound selected by an explicit routing rule.
+// Unlike Resolve, it deliberately does not apply the dispatcher's default
+// outbound when no rule matches. Callers with an identity-specific fallback
+// (for example a local-TUN user's outbound_tag) can use the matched flag to
+// apply that fallback without changing the default behaviour of other
+// inbounds.
+func (d *Dispatcher) ResolveRule(ctx context.Context, req *Request) (string, Outbound, bool) {
 	d.mu.RLock()
 	rules := d.rules
 	d.mu.RUnlock()
 
 	for _, r := range rules {
 		if r.Match(req) {
-			return r.tag, d.outbounds[r.tag]
+			return r.tag, d.outbounds[r.tag], true
 		}
 	}
 
@@ -94,18 +112,13 @@ func (d *Dispatcher) Resolve(ctx context.Context, req *Request) (string, Outboun
 					alt := *req
 					alt.TargetHost = ip.String()
 					if r.Match(&alt) {
-						return r.tag, d.outbounds[r.tag]
+						return r.tag, d.outbounds[r.tag], true
 					}
 				}
 			}
 		}
 	}
-
-	tag := d.defaultOutbound
-	if tag == "" {
-		tag = d.firstOutboundTag
-	}
-	return tag, d.outbounds[tag]
+	return "", nil, false
 }
 
 // Dispatch applies routing then asks the chosen Outbound to dial.

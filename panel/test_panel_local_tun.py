@@ -26,6 +26,8 @@ class PanelLocalTUNTests(unittest.TestCase):
     def setUp(self):
         with self.panel.db_conn() as con:
             con.execute("DELETE FROM users")
+            con.execute("""INSERT OR IGNORE INTO outbounds(tag,kind,uri,created_at,updated_at)
+                           VALUES('balancer','balancer','{"mode":"alive","outbounds":["direct"]}',0,0)""")
 
     def test_create_disabled_local_user_and_enable_with_interface(self):
         user = self.panel.create_user({
@@ -54,17 +56,29 @@ class PanelLocalTUNTests(unittest.TestCase):
             "local_enabled": True,
             "local_iface": "br-lan",
             "local_fail_closed": True,
+            "outbound_tag": "balancer",
         })
         self.assertTrue(updated["local_enabled"])
         self.assertEqual(updated["local_iface"], "br-lan")
         self.assertTrue(updated["local_fail_closed"])
-        self.assertEqual(updated["outbound_tag"], "direct")
+        self.assertEqual(updated["outbound_tag"], "balancer")
 
-        ignored = self.panel.update_user(user["id"], {
+        with self.assertRaisesRegex(ValueError, "does not exist"):
+            self.panel.update_user(user["id"], {
+                "user_kind": "local_tun",
+                "outbound_tag": "does-not-exist",
+            })
+
+    def test_create_local_user_preserves_fallback_outbound(self):
+        user = self.panel.create_user({
+            "name": "router-lan",
             "user_kind": "local_tun",
-            "outbound_tag": "does-not-exist",
+            "outbound_tag": "balancer",
+            "local_enabled": False,
         })
-        self.assertEqual(ignored["outbound_tag"], "direct")
+        self.assertEqual(user["outbound_tag"], "balancer")
+        self.assertIn('id="addLocalFallback"', self.panel.PANEL_HTML)
+        self.assertIn('id="editLocalFallback"', self.panel.PANEL_HTML)
 
     def test_only_one_local_user_and_kind_is_immutable(self):
         user = self.panel.create_user({
