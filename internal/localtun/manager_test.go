@@ -8,6 +8,19 @@ import (
 	"time"
 )
 
+func TestPrepareEnabledConfigAcceptsFallbackOnly(t *testing.T) {
+	cfg := Config{
+		UserID: "local-1", UserName: "router-lan", Enabled: true,
+		FallbackTag: "balancer", Interface: "br-lan", AutoRoute: true,
+	}.normalized()
+	if err := prepareEnabledConfig(&cfg); err != nil {
+		t.Fatalf("fallback-only config rejected: %v", err)
+	}
+	if cfg.OutboundTag != "balancer" {
+		t.Fatalf("effective tunnel outbound = %q, want fallback balancer", cfg.OutboundTag)
+	}
+}
+
 func TestWaitRuntimeSupervisesEverySignal(t *testing.T) {
 	t.Run("context", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())

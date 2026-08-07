@@ -4,6 +4,7 @@ type LocalTUNConfig struct {
 	UserID        string
 	UserName      string
 	Enabled       bool
+	FallbackTag   string
 	Interface     string
 	TunName       string
 	TunAddress    string
@@ -30,7 +31,7 @@ func (s *Server) LocalTUNConfigs() []LocalTUNConfig {
 		}
 		out = append(out, LocalTUNConfig{
 			UserID: user.ID, UserName: user.Name,
-			Enabled:   user.LocalEnabled,
+			Enabled: user.LocalEnabled, FallbackTag: user.OutboundTag,
 			Interface: user.LocalInterface, TunName: user.LocalTunName,
 			TunAddress: user.LocalTunAddress, MTU: user.LocalTunMTU,
 			AutoRoute: user.LocalAutoRoute, BypassPrivate: user.LocalBypassPrivate,

@@ -86,7 +86,7 @@ func (r *selectiveRouteController) Setup(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if len(policy.rules) == 0 {
+	if len(policy.rules) == 0 && !fallbackUsesTunnel(r.cfg.FallbackTag) {
 		return errors.New("local TUN has no applicable routing rules")
 	}
 	ifaces, err := localSourceInterfaces(r.cfg.Interface)
@@ -140,6 +140,15 @@ func (r *selectiveRouteController) Setup(ctx context.Context) error {
 		return r.rollbackSetup(err)
 	}
 	return nil
+}
+
+func fallbackUsesTunnel(tag string) bool {
+	switch strings.TrimSpace(tag) {
+	case "", "direct", "block":
+		return false
+	default:
+		return true
+	}
 }
 
 func (r *selectiveRouteController) Cleanup(ctx context.Context) error {
@@ -244,6 +253,22 @@ func (r *selectiveRouteController) nftConfig(policy ingressPolicy, ifaces []stri
 	fmt.Fprintf(&b, "    %s ip6 daddr @bypass_v6 return\n", iif)
 	for _, rule := range policy.rules {
 		for _, line := range nftRuleLines(rule, iif) {
+			fmt.Fprintf(&b, "    %s\n", line)
+		}
+	}
+	// A local user's outbound_tag is the fallback only after every explicit
+	// routing rule has missed. direct preserves the historical selective path;
+	// other tags must send the remaining IPv4 traffic into the TUN so the
+	// userspace client can ResolveExact that fallback. The TUN is IPv4-only,
+	// therefore the shared tunnel action rejects unmatched IPv6 consistently.
+	switch strings.TrimSpace(r.cfg.FallbackTag) {
+	case "", "direct":
+	case "block":
+		for _, line := range nftRuleLines(ingressRule{action: ingressBlock}, iif) {
+			fmt.Fprintf(&b, "    %s\n", line)
+		}
+	default:
+		for _, line := range nftRuleLines(ingressRule{action: ingressTunnel}, iif) {
 			fmt.Fprintf(&b, "    %s\n", line)
 		}
 	}

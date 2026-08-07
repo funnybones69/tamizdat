@@ -26,18 +26,22 @@ type Accounting interface {
 // outbound registry and routing rules. It deliberately owns no upstream
 // transport: outbound leases remain the single source of truth.
 type Client struct {
-	registry   *obreg.Registry
-	rules      *rulesdb.Store
-	accounting Accounting
-	userID     string
-	userName   string
-	forcedTag  string
-	sniff      bool
-	closed     atomic.Bool
+	registry    *obreg.Registry
+	rules       *rulesdb.Store
+	accounting  Accounting
+	userID      string
+	userName    string
+	fallbackTag string
+	sniff       bool
+	closed      atomic.Bool
 }
 
-func NewClient(registry *obreg.Registry, rules *rulesdb.Store, accounting Accounting, userID, userName, forcedTag string, sniffEnabled bool) *Client {
-	return &Client{registry: registry, rules: rules, accounting: accounting, userID: userID, userName: userName, forcedTag: strings.TrimSpace(forcedTag), sniff: sniffEnabled}
+func NewClient(registry *obreg.Registry, rules *rulesdb.Store, accounting Accounting, userID, userName, fallbackTag string, sniffEnabled bool) *Client {
+	fallbackTag = strings.TrimSpace(fallbackTag)
+	if fallbackTag == "" {
+		fallbackTag = "direct"
+	}
+	return &Client{registry: registry, rules: rules, accounting: accounting, userID: userID, userName: userName, fallbackTag: fallbackTag, sniff: sniffEnabled}
 }
 
 func (c *Client) Close() error {
@@ -94,10 +98,9 @@ func (c *Client) DialRequest(ctx context.Context, req *node.Request) (net.Conn, 
 
 func (c *Client) serveTCP(conn net.Conn, req *node.Request) {
 	defer conn.Close()
-	tagPick := c.forcedTag
 	routingConn := conn
 	routingHost := req.TargetHost
-	if tagPick == "" && c.sniff {
+	if c.sniff {
 		host, buffered, err := sniff.PeekConn(conn, []sniff.Sniffer{sniff.TLSClientHello, sniff.HTTPHost})
 		if buffered != nil {
 			routingConn = buffered
@@ -106,11 +109,9 @@ func (c *Client) serveTCP(conn net.Conn, req *node.Request) {
 			routingHost = host
 		}
 	}
-	if tagPick == "" {
-		routeReq := *req
-		routeReq.TargetHost = routingHost
-		tagPick = rulesdb.ResolveRequest(context.Background(), c.rules.Load(), &routeReq)
-	}
+	routeReq := *req
+	routeReq.TargetHost = routingHost
+	tagPick := c.selectOutbound(context.Background(), &routeReq)
 	if tagPick == "block" {
 		return
 	}
@@ -118,7 +119,7 @@ func (c *Client) serveTCP(conn net.Conn, req *node.Request) {
 	if err != nil {
 		// Closing the net.Pipe side is the TCP equivalent of a block verdict.
 		// Never retry through Registry.Resolve: its compatibility fallback is
-		// intentionally unsafe for a policy-forced local-TUN flow.
+		// intentionally unsafe for an explicitly selected local-TUN flow.
 		return
 	}
 	defer dialer.Close()
@@ -146,16 +147,13 @@ func (c *Client) DialPacketRequest(ctx context.Context, req *node.Request) (net.
 	request.Network = node.NetworkUDP
 	request.InboundTag = "local-tun"
 	request.User = c.userName
-	tagPick := c.forcedTag
-	if tagPick == "" {
-		tagPick = rulesdb.ResolveRequest(ctx, c.rules.Load(), &request)
-	}
+	tagPick := c.selectOutbound(ctx, &request)
 	if tagPick == "block" {
 		return nil, errors.New("local TUN: UDP blocked by routing rule")
 	}
 	dialer, resolvedTag, err := c.registry.ResolveExact(tagPick)
 	if err != nil {
-		return nil, fmt.Errorf("local TUN: forced outbound unavailable: %w", err)
+		return nil, fmt.Errorf("local TUN: selected outbound unavailable: %w", err)
 	}
 	pc, err := dialer.DialPacket(ctx, request.Address())
 	if err != nil {
@@ -163,6 +161,13 @@ func (c *Client) DialPacketRequest(ctx context.Context, req *node.Request) (net.
 		return nil, err
 	}
 	return &meteredPacketConn{PacketConn: pc, lease: dialer, accounting: c.accounting, userID: c.userID, tag: effectiveTag(resolvedTag, pc)}, nil
+}
+
+func (c *Client) selectOutbound(ctx context.Context, request *node.Request) string {
+	if tag := rulesdb.ResolveMatchedRequest(ctx, c.rules.Load(), request); tag != "" {
+		return tag
+	}
+	return c.fallbackTag
 }
 
 func (c *Client) record(tag string, up, down int64) {

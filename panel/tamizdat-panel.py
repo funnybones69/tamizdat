@@ -949,7 +949,7 @@ def create_user(body):
     if kind not in ("remote", "local_tun"):
         raise ValueError("user_kind must be remote or local_tun")
 
-    outbound = "direct" if kind == "local_tun" else ((body.get("outbound_tag") or "direct").strip() or "direct")
+    outbound = (body.get("outbound_tag") or "direct").strip() or "direct"
     local = _local_tun_values(body if kind == "local_tun" else {})
     if kind == "local_tun":
         remote_keys = {"pool_size", "expires_at", "bandwidth_cap", "rate_limit_mbps", "notification_text", "turn_room_link"}
@@ -1034,7 +1034,7 @@ def update_user(user_id, body):
         if not n:
             raise ValueError("name cannot be empty")
         fields.append("name=?"); args.append(n)
-    if kind == "remote" and "outbound_tag" in body:
+    if "outbound_tag" in body:
         ob = (body.get("outbound_tag") or "direct").strip() or "direct"
         with db_conn() as con:
             if not con.execute("SELECT 1 FROM outbounds WHERE tag=?", (ob,)).fetchone():
@@ -1042,9 +1042,6 @@ def update_user(user_id, body):
         fields.append("outbound_tag=?"); args.append(ob)
     prospective_local = None
     if kind == "local_tun":
-        # The tunnel outbound is selected solely by applicable Routing rules.
-        # Ignore the legacy API field so a cached older panel cannot restore
-        # the removed per-profile selector.
         prospective_local = _local_tun_values(body, existing)
         remote_keys = {"pool_size", "expires_at", "bandwidth_cap", "rate_limit_mbps", "notification_text", "turn_room_link"}
         if any(key in body for key in remote_keys):
@@ -6344,7 +6341,9 @@ body.nav-open .nav-backdrop{display:block;opacity:1}
       <label>LAN source interface</label>
       <select id="addLocalIface"><option value="">Select interface...</option></select>
       <div class="cell-meta">Only traffic entering this kernel interface is handled; router-origin traffic stays outside the TUN.</div>
-      <div class="cell-meta">Tunnel destinations and their outbound are controlled exclusively by Routing. Unmatched LAN traffic remains direct.</div>
+      <label>Fallback outbound</label>
+      <select id="addLocalFallback"><option value="direct">direct</option></select>
+      <div class="cell-meta">Routing rules take precedence. Local-TUN traffic that matches no rule uses this outbound.</div>
       <label>TUN device</label><input type="text" id="addLocalTunName" value="taml0">
       <label>TUN address</label><input type="text" id="addLocalTunAddr" value="198.18.0.1/24">
       <label>MTU</label><input type="number" id="addLocalTunMTU" min="576" max="9000" value="1280">
@@ -6416,7 +6415,9 @@ body.nav-open .nav-backdrop{display:block;opacity:1}
       <div class="cell-meta" id="editLocalStatus" style="margin-bottom:8px"></div>
       <label>LAN source interface</label>
       <select id="editLocalIface"><option value="">Select interface...</option></select>
-      <div class="cell-meta">Tunnel destinations and their outbound are controlled exclusively by Routing. Unmatched LAN traffic remains direct.</div>
+      <label>Fallback outbound</label>
+      <select id="editLocalFallback"><option value="direct">direct</option></select>
+      <div class="cell-meta">Routing rules take precedence. Local-TUN traffic that matches no rule uses this outbound.</div>
       <label>TUN device</label><input type="text" id="editLocalTunName">
       <label>TUN address</label><input type="text" id="editLocalTunAddr">
       <label>MTU</label><input type="number" id="editLocalTunMTU" min="576" max="9000">
@@ -7048,12 +7049,32 @@ async function populateLocalInterfaces(selectId, selected=''){
   el.value=selected||'';
 }
 
+function populateLocalFallbacks(selectId, selected='direct'){
+  const el=gid(selectId); if(!el) return;
+  const usable=(outbounds||[]).filter(o=>o.tag);
+  const tags=new Set(usable.map(o=>o.tag));
+  el.innerHTML='';
+  if(selected && !tags.has(selected)){
+    const saved=document.createElement('option'); saved.value=selected; saved.textContent=selected+' (saved)'; el.appendChild(saved);
+  }
+  for(const outbound of usable){
+    const opt=document.createElement('option'); opt.value=outbound.tag;
+    opt.textContent=outbound.tag+' ('+(outbound.kind||outbound.type||'outbound')+')';
+    el.appendChild(opt);
+  }
+  if(!tags.has('direct') && !selected){
+    const direct=document.createElement('option'); direct.value='direct'; direct.textContent='direct'; el.appendChild(direct);
+  }
+  el.value=selected||'direct';
+}
+
 function toggleAddUserKind(){
   const local=gid('addUserKind').value==='local_tun';
   gid('addRemoteFields').style.display=local?'none':'';
   gid('addLocalFields').style.display=local?'':'none';
   if(local){
     populateLocalInterfaces('addLocalIface',gid('addLocalIface').value||'');
+    populateLocalFallbacks('addLocalFallback',gid('addLocalFallback').value||'direct');
   }
 }
 
@@ -7066,6 +7087,7 @@ function openAddUser(){
   gid('addUserQuotaUnit').value='GB';
   gid('addUserExpires').value='';
   gid('addLocalIface').value='';
+  gid('addLocalFallback').value='direct';
   gid('addLocalTunName').value='taml0';
   gid('addLocalTunAddr').value='198.18.0.1/24';
   gid('addLocalTunMTU').value='1280';
@@ -7087,6 +7109,7 @@ async function submitAddUser(){
   if(kind==='local_tun'){
     body={
       name, user_kind:'local_tun',
+      outbound_tag:gid('addLocalFallback').value.trim()||'direct',
       local_enabled:gid('addLocalEnabled').checked,
       local_iface:gid('addLocalIface').value.trim(),
       local_tun_name:gid('addLocalTunName').value.trim(),
@@ -7177,6 +7200,7 @@ function editUser(uid){
   gid('editLocalFields').style.display=local?'':'none';
   if(local){
     populateLocalInterfaces('editLocalIface',u.local_iface||'');
+    populateLocalFallbacks('editLocalFallback',u.outbound_tag||'direct');
     gid('editLocalTunName').value=u.local_tun_name||'taml0';
     gid('editLocalTunAddr').value=u.local_tun_addr||'198.18.0.1/24';
     gid('editLocalTunMTU').value=String(u.local_tun_mtu||1280);
@@ -7226,6 +7250,7 @@ async function saveEdit(){
   if(kind==='local_tun'){
     body={
       name,user_kind:'local_tun',
+      outbound_tag:gid('editLocalFallback').value.trim()||'direct',
       local_enabled:gid('editLocalEnabled').checked,
       local_iface:gid('editLocalIface').value.trim(),
       local_tun_name:gid('editLocalTunName').value.trim(),
@@ -7313,9 +7338,9 @@ function renderOutbounds(){
   const ae=document.activeElement;
   if(ae && ae.tagName==='SELECT' && el.contains(ae)) return;
   if(!outbounds.length){el.innerHTML='<div class="status">No outbounds</div>';return}
-  // CL-3 (2026-05-10): "Users" column removed. Users are no longer pinned
-  // to outbounds via user settings; routing rules are the only mechanism
-  // for outbound selection. The /api/outbounds payload still carries
+  // CL-3 (2026-05-10): "Users" column removed. Remote users are no longer
+  // pinned to outbounds via user settings. A local-TUN user may retain an
+  // outbound_tag solely as its no-routing-rule fallback. The payload carries
   // user_count for backward compat — the panel just stops rendering it.
   // Traffic column restored 2026-05-13 (after the wrap-conn approach was
   // replaced with io.Copy-return accounting in server.go — no more

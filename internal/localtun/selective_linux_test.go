@@ -56,6 +56,29 @@ func TestSelectiveNFTConfigStagesHooksAndPreservesMarks(t *testing.T) {
 	checkNFTSyntax(t, got)
 }
 
+func TestSelectiveNFTConfigRoutesRuleMissThroughUserFallback(t *testing.T) {
+	policy := ingressPolicy{rules: []ingressRule{{
+		index: 0, action: ingressDirect, ipv4: []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")},
+	}}}
+	r := &selectiveRouteController{cfg: Config{
+		Interface: "br-lan", BypassPrivate: true, FallbackTag: "balancer",
+	}}
+	got := r.nftConfig(policy, []string{"br-lan"})
+	directRule := `iifname "br-lan" meta l4proto { tcp, udp } ip daddr @r04 return`
+	fallbackRule := `iifname "br-lan" meta l4proto { tcp, udp } meta nfproto ipv4 meta mark set (meta mark & 0xffffff00) | 0x9d return`
+	directPos, fallbackPos := strings.Index(got, directRule), strings.Index(got, fallbackRule)
+	if directPos < 0 || fallbackPos < 0 {
+		t.Fatalf("missing direct rule or balancer fallback mark:\n%s", got)
+	}
+	if fallbackPos <= directPos {
+		t.Fatalf("fallback mark must follow explicit rules:\n%s", got)
+	}
+	if !strings.Contains(got, `iifname "br-lan" meta l4proto { tcp, udp } meta nfproto ipv6 reject with icmpv6 addr-unreachable`) {
+		t.Fatalf("IPv4-only fallback must reject unmatched IPv6:\n%s", got)
+	}
+	checkNFTSyntax(t, got)
+}
+
 func TestFailClosedStagePublishesKillswitchAndDNSRedirect(t *testing.T) {
 	r := &selectiveRouteController{cfg: Config{Interface: "br-lan", BypassPrivate: true, FailClosed: true}}
 	got := r.nftConfig(ingressPolicy{}, []string{"br-lan"})
@@ -88,6 +111,23 @@ func TestSetupPublishesHooksOnlyAfterRouteAndRule(t *testing.T) {
 	}
 	if !strings.Contains(joined, "udp dport 53 redirect to :53") || !strings.Contains(joined, "tcp dport 53 redirect to :53") {
 		t.Fatalf("DNS interception was not atomically activated:\n%s", joined)
+	}
+}
+
+func TestSetupAcceptsFallbackOnlyPolicy(t *testing.T) {
+	var commands []string
+	r := commandMockController(&commands)
+	r.cfg.Policy = &rulesdb.Snapshot{}
+	r.cfg.FallbackTag = "balancer"
+	if err := r.Setup(context.Background()); err != nil {
+		t.Fatalf("fallback-only setup rejected: %v", err)
+	}
+	joined := strings.Join(commands, "\n")
+	if !strings.Contains(joined, `meta nfproto ipv4 meta mark set (meta mark & 0xffffff00) | 0x9d return`) {
+		t.Fatalf("fallback-only classifier does not mark unmatched IPv4:\n%s", joined)
+	}
+	if !strings.Contains(joined, "jump classify") {
+		t.Fatalf("fallback-only classifier was not activated:\n%s", joined)
 	}
 }
 

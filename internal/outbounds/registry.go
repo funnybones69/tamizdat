@@ -361,7 +361,7 @@ func (r *Registry) Resolve(tag string) (Dialer, string) {
 // ResolveExact returns a leased dialer only when tag exists in the current
 // registry generation. Unlike Resolve it never substitutes the default or
 // direct outbound. Security-sensitive callers (notably the router local-TUN
-// dataplane) use this so a removed/renamed forced outbound fails closed while
+// dataplane) use this so a removed/renamed selected outbound fails closed while
 // SIGHUP is publishing the matching routing snapshot.
 func (r *Registry) ResolveExact(tag string) (Dialer, string, error) {
 	resolved := strings.TrimSpace(tag)
