@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -134,4 +136,60 @@ func TestReplayWindowFlag_DefaultAndOverride(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDebouncedActionCoalescesAfterLastTrigger(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var calls atomic.Int32
+	fired := make(chan struct{}, 1)
+	d := newDebouncedAction(ctx, 500*time.Millisecond, func() {
+		calls.Add(1)
+		fired <- struct{}{}
+	})
+	t.Cleanup(func() {
+		cancel()
+		<-d.Done()
+	})
+
+	d.Trigger()
+	time.Sleep(100 * time.Millisecond)
+	d.Trigger()
+	time.Sleep(100 * time.Millisecond)
+	d.Trigger()
+
+	// The first timer would have fired during this window. Resetting on the
+	// later file refreshes must postpone the one action until the batch settles.
+	select {
+	case <-fired:
+		t.Fatal("debounced action fired before the last quiet period elapsed")
+	case <-time.After(350 * time.Millisecond):
+	}
+	select {
+	case <-fired:
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("debounced action did not fire after the quiet period")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("debounced action calls = %d, want 1", got)
+	}
+}
+
+func TestDebouncedActionStopsPendingTimerOnShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var calls atomic.Int32
+	d := newDebouncedAction(ctx, 100*time.Millisecond, func() { calls.Add(1) })
+	d.Trigger()
+	cancel()
+	select {
+	case <-d.Done():
+	case <-time.After(time.Second):
+		t.Fatal("debounce timer goroutine did not stop after cancellation")
+	}
+	time.Sleep(150 * time.Millisecond)
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("debounced action ran %d times after shutdown", got)
+	}
+
+	// A late OnRefresh racing with shutdown must return instead of blocking.
+	d.Trigger()
 }
