@@ -2,8 +2,10 @@ package localtun
 
 import (
 	"context"
+	"database/sql"
 	"io"
 	"net"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +14,20 @@ import (
 	"github.com/funnybones69/tamizdat/internal/rulesdb"
 	"github.com/funnybones69/tamizdat/node"
 )
+
+func localClientRegistry(t *testing.T) (*obreg.Registry, *sql.DB) {
+	t.Helper()
+	db, err := obreg.OpenSQLite(filepath.Join(t.TempDir(), "outbounds.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	registry := obreg.NewRegistry(nil)
+	if err := registry.Reload(db); err != nil {
+		t.Fatal(err)
+	}
+	return registry, db
+}
 
 type testAccounting struct {
 	mu       sync.Mutex
@@ -60,7 +76,8 @@ func TestClientTCPThroughDirectOutbound(t *testing.T) {
 	}()
 
 	accounting := &testAccounting{}
-	client := NewClient(obreg.NewRegistry(nil), &rulesdb.Store{}, accounting, "local-1", "router-lan", "", false)
+	registry, _ := localClientRegistry(t)
+	client := NewClient(registry, &rulesdb.Store{}, accounting, "local-1", "router-lan", "direct", false)
 	conn, err := client.DialRequest(context.Background(), &node.Request{
 		Network: node.NetworkTCP, TargetHost: "127.0.0.1", TargetPort: ln.Addr().(*net.TCPAddr).Port,
 		SourceIP: net.ParseIP("192.168.1.105"),
@@ -116,7 +133,8 @@ func TestClientUDPThroughDirectOutbound(t *testing.T) {
 	}()
 
 	accounting := &testAccounting{}
-	client := NewClient(obreg.NewRegistry(nil), &rulesdb.Store{}, accounting, "local-1", "router-lan", "", false)
+	registry, _ := localClientRegistry(t)
+	client := NewClient(registry, &rulesdb.Store{}, accounting, "local-1", "router-lan", "direct", false)
 	port := server.LocalAddr().(*net.UDPAddr).Port
 	pc, err := client.DialPacketRequest(context.Background(), &node.Request{
 		Network: node.NetworkUDP, TargetHost: "127.0.0.1", TargetPort: port,
@@ -146,5 +164,52 @@ func TestClientUDPThroughDirectOutbound(t *testing.T) {
 	up, down := accounting.bytes()
 	if up < 3 || down < 8 {
 		t.Fatalf("accounting up/down = %d/%d, want at least 3/8", up, down)
+	}
+}
+
+func TestClientUDPUnknownForcedTagDoesNotDialDirect(t *testing.T) {
+	registry, _ := localClientRegistry(t)
+	client := NewClient(registry, &rulesdb.Store{}, nil, "local-1", "router-lan", "deleted", false)
+	_, err := client.DialPacketRequest(context.Background(), &node.Request{
+		Network: node.NetworkUDP, TargetHost: "127.0.0.1", TargetPort: 9,
+	})
+	if err == nil {
+		t.Fatal("unknown forced UDP outbound unexpectedly succeeded through direct")
+	}
+}
+
+func TestClientTCPDeletedForcedTagClosesInsteadOfDialingDirect(t *testing.T) {
+	registry, _ := localClientRegistry(t)
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	accepted := make(chan struct{}, 1)
+	go func() {
+		_ = ln.(*net.TCPListener).SetDeadline(time.Now().Add(300 * time.Millisecond))
+		if conn, err := ln.Accept(); err == nil {
+			_ = conn.Close()
+			accepted <- struct{}{}
+		}
+	}()
+	client := NewClient(registry, &rulesdb.Store{}, nil, "local-1", "router-lan", "deleted", false)
+	conn, err := client.DialRequest(context.Background(), &node.Request{
+		Network: node.NetworkTCP, TargetHost: "127.0.0.1", TargetPort: ln.Addr().(*net.TCPAddr).Port,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(time.Second))
+	_, _ = conn.Write([]byte("must-not-go-direct"))
+	buf := make([]byte, 1)
+	if _, err := conn.Read(buf); err == nil {
+		t.Fatal("unknown forced TCP outbound remained open")
+	}
+	select {
+	case <-accepted:
+		t.Fatal("unknown forced TCP outbound reached direct listener")
+	case <-time.After(350 * time.Millisecond):
 	}
 }

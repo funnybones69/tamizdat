@@ -34,6 +34,7 @@ type Options struct {
 	DialMinAttemptBudget     time.Duration
 	DialRecoveryThreshold    int
 	DialRecoveryBackoff      time.Duration
+	UDPIdleTimeout           time.Duration
 	DropPrivateDestinations  bool
 	DropAllUDP               bool
 	DropNonDNSUDP            bool
@@ -41,6 +42,16 @@ type Options struct {
 	BlockedEndpoints         []netip.AddrPort
 	Dispatcher               *node.Dispatcher
 	PostTunUp                func() error // optional callback fired once TUN device + stack are open
+}
+
+type udpTimeoutSetter interface {
+	SetUDPTimeout(time.Duration)
+}
+
+func setUDPIdleTimeout(handler udpTimeoutSetter, timeout time.Duration) {
+	if handler != nil && timeout > 0 {
+		handler.SetUDPTimeout(timeout)
+	}
 }
 
 // RequestProxyClient is an optional extension used by local inbounds. It

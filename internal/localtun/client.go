@@ -114,7 +114,13 @@ func (c *Client) serveTCP(conn net.Conn, req *node.Request) {
 	if tagPick == "block" {
 		return
 	}
-	dialer, resolvedTag := c.registry.Resolve(tagPick)
+	dialer, resolvedTag, err := c.registry.ResolveExact(tagPick)
+	if err != nil {
+		// Closing the net.Pipe side is the TCP equivalent of a block verdict.
+		// Never retry through Registry.Resolve: its compatibility fallback is
+		// intentionally unsafe for a policy-forced local-TUN flow.
+		return
+	}
 	defer dialer.Close()
 
 	dialCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -147,7 +153,10 @@ func (c *Client) DialPacketRequest(ctx context.Context, req *node.Request) (net.
 	if tagPick == "block" {
 		return nil, errors.New("local TUN: UDP blocked by routing rule")
 	}
-	dialer, resolvedTag := c.registry.Resolve(tagPick)
+	dialer, resolvedTag, err := c.registry.ResolveExact(tagPick)
+	if err != nil {
+		return nil, fmt.Errorf("local TUN: forced outbound unavailable: %w", err)
+	}
 	pc, err := dialer.DialPacket(ctx, request.Address())
 	if err != nil {
 		_ = dialer.Close()
