@@ -337,6 +337,9 @@ func main() {
 					log.Printf("geodata: post-refresh routing republish skipped: %v", err)
 				} else {
 					log.Printf("geodata: %s refreshed → routing republished (%d rules)", path, total)
+					if err := reconcileLocalTUN(localTUNMgr, server, routingStore.Load()); err != nil {
+						log.Printf("geodata: post-refresh local TUN reconcile failed: %v", err)
+					}
 				}
 			},
 		}
