@@ -358,6 +358,28 @@ func (r *Registry) Resolve(tag string) (Dialer, string) {
 	return d.acquire(rec), resolved
 }
 
+// ResolveExact returns a leased dialer only when tag exists in the current
+// registry generation. Unlike Resolve it never substitutes the default or
+// direct outbound. Security-sensitive callers (notably the router local-TUN
+// dataplane) use this so a removed/renamed forced outbound fails closed while
+// SIGHUP is publishing the matching routing snapshot.
+func (r *Registry) ResolveExact(tag string) (Dialer, string, error) {
+	resolved := strings.TrimSpace(tag)
+	if resolved == "" {
+		return nil, "", fmt.Errorf("exact outbound tag is empty")
+	}
+	if r == nil {
+		return nil, resolved, fmt.Errorf("outbound %q is unavailable: nil registry", resolved)
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	d := r.byTag[resolved]
+	if d == nil {
+		return nil, resolved, fmt.Errorf("outbound %q is unavailable", resolved)
+	}
+	return d.acquire(r.recorder), resolved, nil
+}
+
 func (r *Registry) DefaultTag() string {
 	if r == nil {
 		return "direct"

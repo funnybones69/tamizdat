@@ -295,3 +295,22 @@ func TestRegistryReloadRetiresOldDialerAfterLeaseRelease(t *testing.T) {
 		t.Fatalf("new client dials=%d", clients[1].dials.Load())
 	}
 }
+
+func TestRegistryResolveExactNeverFallsBackToDirect(t *testing.T) {
+	db := openTestDB(t)
+	r := NewRegistry(nil)
+	if err := r.Reload(db); err != nil {
+		t.Fatal(err)
+	}
+	if d, tag, err := r.ResolveExact("deleted"); err == nil || d != nil || tag != "deleted" {
+		t.Fatalf("ResolveExact deleted = (%T, %q, %v), want nil, deleted, error", d, tag, err)
+	}
+	d, tag, err := r.ResolveExact("direct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if tag != "direct" {
+		t.Fatalf("ResolveExact direct tag = %q", tag)
+	}
+}
