@@ -5,8 +5,10 @@ package localtun
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -57,14 +59,17 @@ func (r *linuxRouteController) Setup(ctx context.Context) error {
 
 func (r *linuxRouteController) Cleanup(ctx context.Context) error {
 	// Fail open: stop marking LAN packets before removing the policy route.
-	_ = runCommand(ctx, nil, "nft", "delete", "table", "inet", localNFTTable)
+	if err := runCommandIgnoreNotFound(ctx, nil, "nft", "delete", "table", "inet", localNFTTable); err != nil {
+		return err
+	}
 	return r.cleanupPolicy(ctx)
 }
 
 func (r *linuxRouteController) cleanupPolicy(ctx context.Context) error {
-	_ = runCommand(ctx, nil, "ip", "rule", "del", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID)
-	_ = runCommand(ctx, nil, "ip", "route", "flush", "table", localTableID)
-	return nil
+	return errors.Join(
+		runCommandIgnoreNotFound(ctx, nil, "ip", "rule", "del", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID),
+		runCommandIgnoreNotFound(ctx, nil, "ip", "route", "flush", "table", localTableID),
+	)
 }
 
 func (r *linuxRouteController) nftConfig() string {
@@ -80,12 +85,22 @@ func (r *linuxRouteController) nftConfig() string {
   }
   chain prerouting {
     type filter hook prerouting priority mangle; policy accept;
+    iifname %q fib daddr type local return
     iifname %q ip daddr @bypass_v4 return
-    iifname %q meta l4proto { tcp, udp } meta mark set 0x9d
+    iifname %q meta l4proto { tcp, udp } meta mark set (meta mark & 0xffffff00) | 0x9d
   }
 }
-`, localNFTTable, strings.Join(bypass, ", "), r.cfg.Interface, r.cfg.Interface)
+`, localNFTTable, strings.Join(bypass, ", "), r.cfg.Interface, r.cfg.Interface, r.cfg.Interface)
 }
+
+type commandError struct {
+	command string
+	output  string
+	cause   error
+}
+
+func (e *commandError) Error() string { return e.command + ": " + e.output }
+func (e *commandError) Unwrap() error { return e.cause }
 
 func runCommand(parent context.Context, stdin []byte, name string, args ...string) error {
 	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
@@ -105,5 +120,42 @@ func runCommand(parent context.Context, stdin []byte, name string, args ...strin
 	if message == "" {
 		message = err.Error()
 	}
-	return fmt.Errorf("%s: %s", name, message)
+	return &commandError{command: strings.Join(append([]string{name}, args...), " "), output: message, cause: err}
+}
+
+func runCommandIgnoreNotFound(parent context.Context, stdin []byte, name string, args ...string) error {
+	err := runCommand(parent, stdin, name, args...)
+	if isCommandNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+func isCommandNotFound(err error) bool {
+	var commandErr *commandError
+	if !errors.As(err, &commandErr) {
+		return false
+	}
+	// A missing ip/nft executable is not an idempotent cleanup success. Only
+	// kernel/userspace ENOENT reports for the requested object may be ignored.
+	if errors.Is(commandErr.cause, os.ErrNotExist) {
+		return false
+	}
+	text := strings.ToLower(commandErr.output)
+	return strings.Contains(text, "no such file or directory") || strings.Contains(text, "does not exist")
+}
+
+func commandOutput(parent context.Context, name string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	out, err := cmd.CombinedOutput()
+	message := strings.TrimSpace(string(out))
+	if err == nil {
+		return message, nil
+	}
+	if message == "" {
+		message = err.Error()
+	}
+	return "", &commandError{command: strings.Join(append([]string{name}, args...), " "), output: message, cause: err}
 }

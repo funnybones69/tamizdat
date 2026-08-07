@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -28,7 +29,7 @@ const (
 	localDNSPID       = localDNSDir + "/chinadns.pid"
 	localDNSState     = localDNSDir + "/dnsmasq-state.json"
 	localDNSLog       = localDNSDir + "/chinadns.log"
-	localDNSPort      = 65353
+	localDNSPort      = 5335
 	localChinaDNSPath = "/usr/bin/chinadns-ng"
 )
 
@@ -39,6 +40,12 @@ type selectiveRouteController struct {
 	cfg     Config
 	dnsCmd  *exec.Cmd
 	dnsDone chan error
+	dnsMu   sync.Mutex
+	dnsErr  error
+	policy  ingressPolicy
+	ifaces  []string
+	run     func(context.Context, []byte, string, ...string) error
+	output  func(context.Context, string, ...string) (string, error)
 }
 
 type dnsmasqSnapshot struct {
@@ -47,11 +54,25 @@ type dnsmasqSnapshot struct {
 	StrictOrderSet bool     `json:"strict_order_set"`
 }
 
+func (r *selectiveRouteController) command(ctx context.Context, stdin []byte, name string, args ...string) error {
+	if r.run != nil {
+		return r.run(ctx, stdin, name, args...)
+	}
+	return runCommand(ctx, stdin, name, args...)
+}
+
+func (r *selectiveRouteController) commandOutput(ctx context.Context, name string, args ...string) (string, error) {
+	if r.output != nil {
+		return r.output(ctx, name, args...)
+	}
+	return commandOutput(ctx, name, args...)
+}
+
 func (r *selectiveRouteController) Setup(ctx context.Context) error {
-	if err := runCommand(ctx, nil, "ip", "addr", "replace", r.cfg.TunAddress, "dev", r.cfg.TunName); err != nil {
+	if err := r.command(ctx, nil, "ip", "addr", "replace", r.cfg.TunAddress, "dev", r.cfg.TunName); err != nil {
 		return err
 	}
-	if err := runCommand(ctx, nil, "ip", "link", "set", "dev", r.cfg.TunName, "mtu", fmt.Sprint(r.cfg.MTU), "up"); err != nil {
+	if err := r.command(ctx, nil, "ip", "link", "set", "dev", r.cfg.TunName, "mtu", fmt.Sprint(r.cfg.MTU), "up"); err != nil {
 		return err
 	}
 	if !r.cfg.AutoRoute {
@@ -73,45 +94,93 @@ func (r *selectiveRouteController) Setup(ctx context.Context) error {
 		return err
 	}
 
-	// Build the classifier first. Until the fwmark rule is installed at the
-	// end of Setup, matching packets still fail open through the normal WAN.
-	_ = runCommand(ctx, nil, "nft", "delete", "table", "inet", localNFTTable)
-	if err := runCommand(ctx, []byte(r.nftConfig(policy, ifaces)), "nft", "-f", "-"); err != nil {
-		return err
+	r.policy, r.ifaces = policy, ifaces
+
+	// Phase 1: replace only staged sets + regular chains. In compatibility
+	// mode they have no hooks and therefore cannot classify traffic yet. The
+	// opt-in fail-closed mode keeps a staged public-WAN drop hook while the new
+	// generation is prepared.
+	stage := r.nftConfig(policy, ifaces)
+	if _, err := r.commandOutput(ctx, "nft", "list", "table", "inet", localNFTTable); err == nil {
+		stage = "delete table inet " + localNFTTable + "\n" + stage
+	} else if !isCommandNotFound(err) {
+		return r.rollbackSetup(fmt.Errorf("inspect old nft table: %w", err))
 	}
-	if policy.dynamicGroups > 0 {
-		if err := r.startManagedDNS(ctx, policy); err != nil {
-			_ = runCommand(context.Background(), nil, "nft", "delete", "table", "inet", localNFTTable)
-			return err
-		}
+	if err := r.command(ctx, []byte(stage), "nft", "-f", "-"); err != nil {
+		return r.rollbackSetup(err)
 	}
 
-	if err := runCommand(ctx, nil, "ip", "route", "replace", "table", localTableID, "default", "dev", r.cfg.TunName); err != nil {
-		return err
+	if err := r.command(ctx, nil, "ip", "route", "replace", "table", localTableID, "default", "dev", r.cfg.TunName); err != nil {
+		return r.rollbackSetup(err)
 	}
 	// The v1 local TUN data plane is IPv4-only. Older builds installed an
 	// IPv6 default route to the TUN anyway, which black-holed IPv6-preferred
 	// clients such as iOS. Remove any stale IPv6 policy state; nft rejects
 	// only tunnel-selected IPv6 destinations so clients immediately retry A.
-	_ = runCommand(ctx, nil, "ip", "-6", "rule", "del", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID)
-	_ = runCommand(ctx, nil, "ip", "-6", "route", "del", "default", "dev", r.cfg.TunName)
-	_ = runCommand(ctx, nil, "ip", "rule", "del", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID)
-	if err := runCommand(ctx, nil, "ip", "rule", "add", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID); err != nil {
-		_ = runCommand(context.Background(), nil, "ip", "route", "flush", "table", localTableID)
-		return err
+	if err := errors.Join(
+		r.commandIgnoreNotFound(ctx, nil, "ip", "-6", "rule", "del", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID),
+		r.commandIgnoreNotFound(ctx, nil, "ip", "-6", "route", "del", "default", "dev", r.cfg.TunName),
+		r.commandIgnoreNotFound(ctx, nil, "ip", "rule", "del", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID),
+	); err != nil {
+		return r.rollbackSetup(err)
+	}
+	if err := r.command(ctx, nil, "ip", "rule", "add", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID); err != nil {
+		return r.rollbackSetup(err)
+	}
+	if policy.dynamicGroups > 0 {
+		if err := r.startManagedDNS(ctx, policy); err != nil {
+			return r.rollbackSetup(err)
+		}
+	}
+
+	// Phase 2 (last operation): atomically publish both the mangle classifier
+	// and DNS redirect hook. At this point the TUN, route, RPDB rule, nft sets,
+	// dnsmasq and ChinaDNS are all ready.
+	if err := r.activateHooks(ctx, false); err != nil {
+		return r.rollbackSetup(err)
 	}
 	return nil
 }
 
 func (r *selectiveRouteController) Cleanup(ctx context.Context) error {
-	// Fail open in this order: stop marking, remove the policy route, restore
-	// the original DNS upstreams, then terminate our private ChinaDNS process.
-	_ = runCommand(ctx, nil, "nft", "delete", "table", "inet", localNFTTable)
-	_ = runCommand(ctx, nil, "ip", "-6", "rule", "del", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID)
-	_ = runCommand(ctx, nil, "ip", "-6", "route", "del", "default", "dev", r.cfg.TunName)
-	_ = runCommand(ctx, nil, "ip", "rule", "del", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID)
-	_ = runCommand(ctx, nil, "ip", "route", "flush", "table", localTableID)
-	return r.cleanupManagedDNS(ctx)
+	// Reverse setup order. Refuse to remove the RPDB route if hooks could not
+	// be detached: marked traffic must never fall through to the normal WAN.
+	if err := r.deactivateHooks(ctx); err != nil {
+		return err
+	}
+	err := errors.Join(
+		r.cleanupManagedDNS(ctx),
+		r.commandIgnoreNotFound(ctx, nil, "ip", "-6", "rule", "del", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID),
+		r.commandIgnoreNotFound(ctx, nil, "ip", "-6", "route", "del", "default", "dev", r.cfg.TunName),
+		r.commandIgnoreNotFound(ctx, nil, "ip", "rule", "del", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID),
+		r.commandIgnoreNotFound(ctx, nil, "ip", "route", "flush", "table", localTableID),
+	)
+	// Hooks are already detached, so continue all remaining reverse-order
+	// cleanup even when one command fails. Returning the joined command and
+	// invariant errors lets the manager refuse an overlapping generation.
+	tableErr := r.commandIgnoreNotFound(ctx, nil, "nft", "delete", "table", "inet", localNFTTable)
+	verifyErr := r.verifyCleanup(ctx)
+	return errors.Join(err, tableErr, verifyErr)
+}
+
+func (r *selectiveRouteController) commandIgnoreNotFound(ctx context.Context, stdin []byte, name string, args ...string) error {
+	err := r.command(ctx, stdin, name, args...)
+	if isCommandNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+func (r *selectiveRouteController) rollbackSetup(setupErr error) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	var cleanupErr error
+	if r.cfg.FailClosed {
+		cleanupErr = r.EnterFailClosed(cleanupCtx)
+	} else {
+		cleanupErr = r.Cleanup(cleanupCtx)
+	}
+	return errors.Join(setupErr, cleanupErr)
 }
 
 func localSourceInterfaces(primary string) ([]string, error) {
@@ -162,9 +231,15 @@ func (r *selectiveRouteController) nftConfig(policy ingressPolicy, ifaces []stri
 		}
 	}
 
-	b.WriteString("  chain prerouting {\n")
-	b.WriteString("    type filter hook prerouting priority mangle; policy accept;\n")
+	b.WriteString("  chain classify {\n")
 	iif := nftInterfaceExpr(ifaces)
+	// fw4 DNAT runs after this mangle chain. A local FIB destination includes
+	// the router's own WAN address, so hairpin/port-forward and router-local
+	// services stay on the normal fw4 path before any policy restriction.
+	fmt.Fprintf(&b, "    %s fib daddr type local return\n", iif)
+	// DNS-over-TLS/QUIC must not bypass ChinaDNS. DoH is indistinguishable
+	// from ordinary HTTPS and is documented as an explicit limitation.
+	fmt.Fprintf(&b, "    %s meta l4proto { tcp, udp } th dport 853 drop\n", iif)
 	fmt.Fprintf(&b, "    %s ip daddr @bypass_v4 return\n", iif)
 	fmt.Fprintf(&b, "    %s ip6 daddr @bypass_v6 return\n", iif)
 	for _, rule := range policy.rules {
@@ -172,8 +247,189 @@ func (r *selectiveRouteController) nftConfig(policy ingressPolicy, ifaces []stri
 			fmt.Fprintf(&b, "    %s\n", line)
 		}
 	}
-	b.WriteString("  }\n}\n")
+	b.WriteString("  }\n")
+	b.WriteString("  chain killswitch {\n")
+	fmt.Fprintf(&b, "    %s fib daddr type local return\n", iif)
+	fmt.Fprintf(&b, "    %s meta l4proto { tcp, udp } th dport 853 drop\n", iif)
+	fmt.Fprintf(&b, "    %s ip daddr @bypass_v4 return\n", iif)
+	fmt.Fprintf(&b, "    %s ip6 daddr @bypass_v6 return\n", iif)
+	fmt.Fprintf(&b, "    %s meta l4proto { tcp, udp } drop\n", iif)
+	b.WriteString("  }\n")
+	if r.cfg.FailClosed {
+		b.WriteString("  chain prerouting { type filter hook prerouting priority mangle; policy accept; jump killswitch; }\n")
+		writeDNSHook(&b, iif, "  ")
+	}
+	b.WriteString("}\n")
 	return b.String()
+}
+
+func writeDNSHook(b *strings.Builder, iif, indent string) {
+	fmt.Fprintf(b, "%schain dns_prerouting {\n", indent)
+	fmt.Fprintf(b, "%s  type nat hook prerouting priority -105; policy accept;\n", indent)
+	fmt.Fprintf(b, "%s  %s udp dport 53 redirect to :53\n", indent, iif)
+	fmt.Fprintf(b, "%s  %s tcp dport 53 redirect to :53\n", indent, iif)
+	fmt.Fprintf(b, "%s}\n", indent)
+}
+
+func (r *selectiveRouteController) chainExists(ctx context.Context, chain string) (bool, error) {
+	_, err := r.commandOutput(ctx, "nft", "list", "chain", "inet", localNFTTable, chain)
+	if err == nil {
+		return true, nil
+	}
+	if isCommandNotFound(err) {
+		return false, nil
+	}
+	return false, err
+}
+
+func (r *selectiveRouteController) activateHooks(ctx context.Context, killswitch bool) error {
+	target := "classify"
+	if killswitch {
+		target = "killswitch"
+	}
+	iif := nftInterfaceExpr(r.ifaces)
+	preExists, err := r.chainExists(ctx, "prerouting")
+	if err != nil {
+		return err
+	}
+	dnsExists, err := r.chainExists(ctx, "dns_prerouting")
+	if err != nil {
+		return err
+	}
+	var b strings.Builder
+	if preExists {
+		b.WriteString("flush chain inet " + localNFTTable + " prerouting\n")
+	} else {
+		fmt.Fprintf(&b, "add chain inet %s prerouting { type filter hook prerouting priority mangle; policy accept; }\n", localNFTTable)
+	}
+	fmt.Fprintf(&b, "add rule inet %s prerouting jump %s\n", localNFTTable, target)
+	if dnsExists {
+		b.WriteString("flush chain inet " + localNFTTable + " dns_prerouting\n")
+	} else {
+		fmt.Fprintf(&b, "add chain inet %s dns_prerouting { type nat hook prerouting priority -105; policy accept; }\n", localNFTTable)
+	}
+	fmt.Fprintf(&b, "add rule inet %s dns_prerouting %s udp dport 53 redirect to :53\n", localNFTTable, iif)
+	fmt.Fprintf(&b, "add rule inet %s dns_prerouting %s tcp dport 53 redirect to :53\n", localNFTTable, iif)
+	return r.command(ctx, []byte(b.String()), "nft", "-f", "-")
+}
+
+func (r *selectiveRouteController) deactivateHooks(ctx context.Context) error {
+	if _, err := r.commandOutput(ctx, "nft", "list", "table", "inet", localNFTTable); err != nil {
+		if isCommandNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	var b strings.Builder
+	for _, chain := range []string{"prerouting", "dns_prerouting"} {
+		exists, err := r.chainExists(ctx, chain)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			continue
+		}
+		fmt.Fprintf(&b, "flush chain inet %s %s\ndelete chain inet %s %s\n", localNFTTable, chain, localNFTTable, chain)
+	}
+	if b.Len() == 0 {
+		return nil
+	}
+	return r.command(ctx, []byte(b.String()), "nft", "-f", "-")
+}
+
+func (r *selectiveRouteController) verifyCleanup(ctx context.Context) error {
+	var errs []error
+	if _, err := r.commandOutput(ctx, "nft", "list", "table", "inet", localNFTTable); err == nil {
+		errs = append(errs, fmt.Errorf("nft table inet %s still exists after cleanup", localNFTTable))
+	} else if !isCommandNotFound(err) {
+		errs = append(errs, err)
+	}
+	if out, err := r.commandOutput(ctx, "ip", "rule", "show", "priority", localPriority); err != nil {
+		errs = append(errs, err)
+	} else if strings.TrimSpace(out) != "" {
+		errs = append(errs, fmt.Errorf("ip rule priority %s still exists: %s", localPriority, out))
+	}
+	if out, err := r.commandOutput(ctx, "ip", "route", "show", "table", localTableID); err != nil {
+		errs = append(errs, err)
+	} else if strings.TrimSpace(out) != "" {
+		errs = append(errs, fmt.Errorf("ip route table %s still exists: %s", localTableID, out))
+	}
+	return errors.Join(errs...)
+}
+
+func (r *selectiveRouteController) EnterFailClosed(ctx context.Context) error {
+	if !r.cfg.AutoRoute || !r.cfg.FailClosed {
+		return r.Cleanup(ctx)
+	}
+	if len(r.ifaces) == 0 {
+		r.ifaces = []string{r.cfg.Interface}
+	}
+	stage := r.nftConfig(ingressPolicy{}, r.ifaces)
+	if _, err := r.commandOutput(ctx, "nft", "list", "table", "inet", localNFTTable); err == nil {
+		// Rebuild instead of assuming an old/legacy table already contains the
+		// killswitch chain. nft -f commits delete+create atomically.
+		stage = "delete table inet " + localNFTTable + "\n" + stage
+	} else if !isCommandNotFound(err) {
+		return err
+	}
+	if err := r.command(ctx, []byte(stage), "nft", "-f", "-"); err != nil {
+		return err
+	}
+	// Once the public-WAN drop hook is committed it is safe to tear down the
+	// unusable dataplane while the supervisor waits before retrying.
+	return errors.Join(
+		r.cleanupManagedDNS(ctx),
+		r.commandIgnoreNotFound(ctx, nil, "ip", "-6", "rule", "del", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID),
+		r.commandIgnoreNotFound(ctx, nil, "ip", "-6", "route", "del", "default", "dev", r.cfg.TunName),
+		r.commandIgnoreNotFound(ctx, nil, "ip", "rule", "del", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID),
+		r.commandIgnoreNotFound(ctx, nil, "ip", "route", "flush", "table", localTableID),
+	)
+}
+
+func (r *selectiveRouteController) DNSDone() <-chan error { return r.dnsDone }
+
+func (r *selectiveRouteController) DNSError() error {
+	r.dnsMu.Lock()
+	defer r.dnsMu.Unlock()
+	return r.dnsErr
+}
+
+func (r *selectiveRouteController) Health(ctx context.Context) error {
+	link, err := r.commandOutput(ctx, "ip", "-o", "link", "show", "dev", r.cfg.TunName)
+	if err != nil {
+		return fmt.Errorf("TUN link invariant: %w", err)
+	}
+	if !strings.Contains(link, "<") || !strings.Contains(link, "UP") {
+		return fmt.Errorf("TUN link %s is not UP: %s", r.cfg.TunName, link)
+	}
+	if !r.cfg.AutoRoute {
+		return nil
+	}
+	route, err := r.commandOutput(ctx, "ip", "route", "show", "table", localTableID)
+	if err != nil || !strings.Contains(route, "default dev "+r.cfg.TunName) {
+		return fmt.Errorf("route table %s invariant failed: %s: %w", localTableID, route, err)
+	}
+	rule, err := r.commandOutput(ctx, "ip", "rule", "show", "priority", localPriority)
+	if err != nil || !strings.Contains(rule, "fwmark 0x9d/0xff") || !strings.Contains(rule, "lookup "+localTableID) {
+		return fmt.Errorf("RPDB rule invariant failed: %s: %w", rule, err)
+	}
+	chain, err := r.commandOutput(ctx, "nft", "list", "chain", "inet", localNFTTable, "prerouting")
+	if err != nil || !strings.Contains(chain, "jump classify") {
+		return fmt.Errorf("nft classifier invariant failed: %s: %w", chain, err)
+	}
+	dnsChain, err := r.commandOutput(ctx, "nft", "list", "chain", "inet", localNFTTable, "dns_prerouting")
+	if err != nil || !strings.Contains(dnsChain, "udp dport 53 redirect") || !strings.Contains(dnsChain, "tcp dport 53 redirect") {
+		return fmt.Errorf("nft DNS redirect invariant failed: %s: %w", dnsChain, err)
+	}
+	if r.policy.dynamicGroups > 0 {
+		if err := dnsProbe(ctx, localDNSPort); err != nil {
+			return fmt.Errorf("ChinaDNS health: %w", err)
+		}
+		if err := dnsProbe(ctx, 53); err != nil {
+			return fmt.Errorf("dnsmasq frontend health: %w", err)
+		}
+	}
+	return nil
 }
 
 func nftRuleLines(rule ingressRule, iif string) []string {
@@ -184,7 +440,7 @@ func nftRuleLines(rule ingressRule, iif string) []string {
 	action4, action6 := "return", "return"
 	switch rule.action {
 	case ingressTunnel:
-		action4 = "meta mark set 0x9d return"
+		action4 = "meta mark set (meta mark & 0xffffff00) | 0x9d return"
 		action6 = "reject with icmpv6 addr-unreachable"
 	case ingressBlock:
 		action4, action6 = "drop", "drop"
@@ -331,8 +587,17 @@ cache-db %s/cache.db
 	}
 	_ = logFile.Close()
 	r.dnsCmd = cmd
-	r.dnsDone = make(chan error, 1)
-	go func() { r.dnsDone <- cmd.Wait() }()
+	r.dnsDone = make(chan error)
+	r.dnsMu.Lock()
+	r.dnsErr = nil
+	r.dnsMu.Unlock()
+	go func() {
+		err := cmd.Wait()
+		r.dnsMu.Lock()
+		r.dnsErr = err
+		r.dnsMu.Unlock()
+		close(r.dnsDone)
+	}()
 	if err := writeAtomic(localDNSPID, []byte(strconv.Itoa(cmd.Process.Pid)+"\n"), 0o600); err != nil {
 		_ = cmd.Process.Kill()
 		return err
@@ -386,77 +651,137 @@ func (r *selectiveRouteController) installDNSMasqFrontend(ctx context.Context) e
 }
 
 func (r *selectiveRouteController) cleanupManagedDNS(ctx context.Context) error {
-	var firstErr error
-	state, err := os.ReadFile(localDNSState)
-	if err == nil {
-		var snapshot dnsmasqSnapshot
-		if json.Unmarshal(state, &snapshot) != nil || len(snapshot.Servers) == 0 {
-			snapshot.Servers = []string{"127.0.0.1#5053", "127.0.0.1#5054"}
-		}
-		_, _ = optionalCommandOutput(ctx, "uci", "-q", "delete", "dhcp.@dnsmasq[0].server")
-		for _, server := range uniqueStrings(snapshot.Servers) {
-			if cmdErr := runCommand(ctx, nil, "uci", "add_list", "dhcp.@dnsmasq[0].server="+server); cmdErr != nil && firstErr == nil {
-				firstErr = cmdErr
-			}
-		}
-		if snapshot.StrictOrderSet {
-			if cmdErr := runCommand(ctx, nil, "uci", "set", "dhcp.@dnsmasq[0].strictorder="+snapshot.StrictOrder); cmdErr != nil && firstErr == nil {
-				firstErr = cmdErr
-			}
-		} else {
-			_, _ = optionalCommandOutput(ctx, "uci", "-q", "delete", "dhcp.@dnsmasq[0].strictorder")
-		}
-		if cmdErr := runCommand(ctx, nil, "uci", "commit", "dhcp"); cmdErr != nil && firstErr == nil {
-			firstErr = cmdErr
-		}
-		if cmdErr := runCommandWithTimeout(ctx, 12*time.Second, nil, "/etc/init.d/dnsmasq", "restart"); cmdErr != nil && firstErr == nil {
-			firstErr = cmdErr
-		}
-		_ = os.Remove(localDNSState)
+	if err := restoreDNSMasqFrontend(ctx); err != nil {
+		// Keep ChinaDNS alive while dnsmasq may still point at it. The saved
+		// state and PID intentionally remain for the manager's cleanup retry.
+		return err
 	}
 
+	var stopErr error
 	if r.dnsCmd != nil && r.dnsCmd.Process != nil {
-		_ = r.dnsCmd.Process.Signal(syscall.SIGTERM)
-		if r.dnsDone != nil {
-			select {
-			case <-r.dnsDone:
-			case <-time.After(2 * time.Second):
-				_ = r.dnsCmd.Process.Kill()
-			}
-		}
+		stopErr = stopManagedChinaDNS(r.dnsCmd, r.dnsDone)
 	} else {
-		_ = stopStaleChinaDNS()
+		stopErr = stopStaleChinaDNS()
+	}
+	if stopErr != nil {
+		return stopErr
 	}
 	r.dnsCmd, r.dnsDone = nil, nil
-	_ = os.Remove(localDNSPID)
-	return firstErr
+	if err := os.Remove(localDNSPID); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove ChinaDNS PID file: %w", err)
+	}
+	return nil
+}
+
+func restoreDNSMasqFrontend(ctx context.Context) error {
+	state, err := os.ReadFile(localDNSState)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read dnsmasq state: %w", err)
+	}
+	var snapshot dnsmasqSnapshot
+	if err := json.Unmarshal(state, &snapshot); err != nil {
+		return fmt.Errorf("decode dnsmasq state: %w", err)
+	}
+	if len(snapshot.Servers) == 0 {
+		return errors.New("dnsmasq state has no upstream servers")
+	}
+
+	// Deleting an already-absent optional UCI value is idempotent. All writes,
+	// commit and restart errors are retained instead of being silently ignored.
+	_, _ = optionalCommandOutput(ctx, "uci", "-q", "delete", "dhcp.@dnsmasq[0].server")
+	var errs []error
+	for _, server := range uniqueStrings(snapshot.Servers) {
+		errs = append(errs, runCommand(ctx, nil, "uci", "add_list", "dhcp.@dnsmasq[0].server="+server))
+	}
+	if snapshot.StrictOrderSet {
+		errs = append(errs, runCommand(ctx, nil, "uci", "set", "dhcp.@dnsmasq[0].strictorder="+snapshot.StrictOrder))
+	} else {
+		_, _ = optionalCommandOutput(ctx, "uci", "-q", "delete", "dhcp.@dnsmasq[0].strictorder")
+	}
+	errs = append(errs,
+		runCommand(ctx, nil, "uci", "commit", "dhcp"),
+		runCommandWithTimeout(ctx, 12*time.Second, nil, "/etc/init.d/dnsmasq", "restart"),
+	)
+	if err := errors.Join(errs...); err != nil {
+		return err
+	}
+	if err := os.Remove(localDNSState); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove dnsmasq state: %w", err)
+	}
+	return nil
+}
+
+func stopManagedChinaDNS(cmd *exec.Cmd, done <-chan error) error {
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil && !processGone(err) {
+		return fmt.Errorf("signal ChinaDNS: %w", err)
+	}
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-time.After(2 * time.Second):
+	}
+	if err := cmd.Process.Kill(); err != nil && !processGone(err) {
+		return fmt.Errorf("kill ChinaDNS: %w", err)
+	}
+	select {
+	case <-done:
+		return nil
+	case <-time.After(2 * time.Second):
+		return errors.New("ChinaDNS did not exit after SIGKILL")
+	}
 }
 
 func stopStaleChinaDNS() error {
 	raw, err := os.ReadFile(localDNSPID)
-	if err != nil {
+	if errors.Is(err, os.ErrNotExist) {
 		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read stale ChinaDNS PID: %w", err)
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
 	if err != nil || pid < 2 {
-		return nil
+		return fmt.Errorf("invalid stale ChinaDNS PID %q", strings.TrimSpace(string(raw)))
 	}
 	cmdline, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-	if err != nil || !bytes.Contains(cmdline, []byte(localDNSConfig)) {
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect stale ChinaDNS process %d: %w", pid, err)
+	}
+	if !bytes.Contains(cmdline, []byte(localDNSConfig)) {
 		return nil
 	}
 	process, err := os.FindProcess(pid)
 	if err != nil {
 		return err
 	}
-	_ = process.Signal(syscall.SIGTERM)
+	if err := process.Signal(syscall.SIGTERM); err != nil && !processGone(err) {
+		return fmt.Errorf("signal stale ChinaDNS: %w", err)
+	}
 	for i := 0; i < 20; i++ {
-		if process.Signal(syscall.Signal(0)) != nil {
+		if err := process.Signal(syscall.Signal(0)); processGone(err) {
 			return nil
+		} else if err != nil {
+			return err
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return process.Kill()
+	if err := process.Kill(); err != nil && !processGone(err) {
+		return fmt.Errorf("kill stale ChinaDNS: %w", err)
+	}
+	return nil
+}
+
+func processGone(err error) bool {
+	return errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH)
 }
 
 func waitDNS(ctx context.Context, port int, done <-chan error) error {

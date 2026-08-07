@@ -48,9 +48,10 @@ func TestSelectiveNFTConfigStagesHooksAndPreservesMarks(t *testing.T) {
 		t.Fatalf("IPv6-only destinations must not be sent to the IPv4-only TUN:\n%s", got)
 	}
 	fib := strings.Index(got, "fib daddr type local return")
+	dot := strings.Index(got, "th dport 853 drop")
 	policyRule := strings.Index(got, "ip daddr @r14")
-	if fib < 0 || policyRule < 0 || fib > policyRule {
-		t.Fatalf("hairpin FIB bypass must precede policy rules:\n%s", got)
+	if fib < 0 || dot < 0 || policyRule < 0 || fib > dot || fib > policyRule {
+		t.Fatalf("hairpin FIB bypass must precede DoT and policy rules:\n%s", got)
 	}
 	checkNFTSyntax(t, got)
 }
@@ -141,6 +142,113 @@ func TestCleanupStopsBeforeRemovingRouteWhenHookDetachFails(t *testing.T) {
 			t.Fatalf("cleanup removed route while marking hook may still exist: %s", command)
 		}
 	}
+}
+
+func TestCleanupCollectsFailuresAndStillRemovesInactiveState(t *testing.T) {
+	var commands []string
+	r := commandMockController(&commands)
+	tableDeleted := false
+	r.output = func(_ context.Context, name string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		if name == "nft" && strings.HasPrefix(joined, "list table") {
+			if tableDeleted {
+				return "", objectNotFoundError("nft list table")
+			}
+			return "table exists", nil
+		}
+		if name == "nft" && strings.HasPrefix(joined, "list chain") {
+			return "chain exists", nil
+		}
+		return "", nil
+	}
+	r.run = func(_ context.Context, stdin []byte, name string, args ...string) error {
+		entry := name + " " + strings.Join(args, " ") + "\n" + string(stdin)
+		commands = append(commands, entry)
+		joined := strings.Join(args, " ")
+		if name == "ip" && strings.HasPrefix(joined, "rule del priority 11570") {
+			return errors.New("injected rule cleanup failure")
+		}
+		if name == "nft" && joined == "delete table inet tamizdat_local" {
+			tableDeleted = true
+		}
+		return nil
+	}
+	err := r.Cleanup(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "injected rule cleanup failure") {
+		t.Fatalf("Cleanup error = %v", err)
+	}
+	joined := strings.Join(commands, "\n")
+	if !strings.Contains(joined, "ip route flush table 157") || !strings.Contains(joined, "nft delete table inet tamizdat_local") {
+		t.Fatalf("cleanup stopped after a non-hook failure:\n%s", joined)
+	}
+}
+
+func TestEnterFailClosedAtomicallyReplacesLegacyTable(t *testing.T) {
+	var commands []string
+	r := commandMockController(&commands)
+	r.cfg.FailClosed = true
+	r.output = func(_ context.Context, name string, args ...string) (string, error) {
+		if name == "nft" && strings.HasPrefix(strings.Join(args, " "), "list table") {
+			return "legacy table exists", nil
+		}
+		return "", nil
+	}
+	if err := r.EnterFailClosed(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(commands, "\n")
+	for _, want := range []string{"delete table inet tamizdat_local", "chain killswitch", "jump killswitch", "udp dport 53 redirect to :53", "tcp dport 53 redirect to :53"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("fail-closed replacement missing %q:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "jump classify") {
+		t.Fatalf("classifier remained active during fail-closed transition:\n%s", joined)
+	}
+}
+
+func TestHealthWithoutAutoRouteChecksOnlyLink(t *testing.T) {
+	r := &selectiveRouteController{cfg: Config{TunName: "taml0"}}
+	var commands []string
+	r.output = func(_ context.Context, name string, args ...string) (string, error) {
+		commands = append(commands, name+" "+strings.Join(args, " "))
+		return "1: taml0: <POINTOPOINT,UP,LOWER_UP> mtu 1280 state UNKNOWN", nil
+	}
+	if err := r.Health(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(commands) != 1 || !strings.Contains(commands[0], "link show dev taml0") {
+		t.Fatalf("manual-route health commands = %v", commands)
+	}
+}
+
+func TestHealthRequiresDNSRedirectHook(t *testing.T) {
+	r := &selectiveRouteController{cfg: Config{TunName: "taml0", AutoRoute: true}}
+	r.output = func(_ context.Context, name string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case name == "ip" && strings.Contains(joined, "link show"):
+			return "1: taml0: <POINTOPOINT,UP,LOWER_UP> mtu 1280 state UNKNOWN", nil
+		case name == "ip" && strings.Contains(joined, "route show"):
+			return "default dev taml0", nil
+		case name == "ip" && strings.Contains(joined, "rule show"):
+			return "11570: from all fwmark 0x9d/0xff lookup 157", nil
+		case name == "nft" && strings.HasSuffix(joined, "prerouting"):
+			return "jump classify", nil
+		case name == "nft" && strings.HasSuffix(joined, "dns_prerouting"):
+			return "udp dport 53 redirect to :53", nil
+		default:
+			return "", nil
+		}
+	}
+	err := r.Health(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "DNS redirect invariant") {
+		t.Fatalf("Health error = %v, want missing TCP DNS redirect", err)
+	}
+}
+
+func objectNotFoundError(command string) error {
+	return &commandError{command: command, output: "No such file or directory", cause: errors.New("exit status 1")}
 }
 
 func commandMockController(commands *[]string) *selectiveRouteController {
