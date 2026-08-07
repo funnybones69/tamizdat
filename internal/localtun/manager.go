@@ -19,9 +19,10 @@ import (
 )
 
 const (
-	defaultTunName    = "taml0"
-	defaultTunAddress = "198.18.0.1/24"
-	defaultTunMTU     = 1280
+	defaultTunName            = "taml0"
+	defaultTunAddress         = "198.18.0.1/24"
+	defaultTunMTU             = 1280
+	healthFailureRestartLimit = 3
 )
 
 var safeInterfaceName = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,15}$`)
@@ -332,6 +333,7 @@ func waitRuntime(
 	healthTick <-chan time.Time,
 	health func(context.Context) error,
 ) error {
+	consecutiveHealthFailures := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -359,7 +361,12 @@ func waitRuntime(
 				checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 				err := health(checkCtx)
 				cancel()
-				if err != nil {
+				if err == nil {
+					consecutiveHealthFailures = 0
+					continue
+				}
+				consecutiveHealthFailures++
+				if consecutiveHealthFailures >= healthFailureRestartLimit {
 					return fmt.Errorf("local TUN invariant check: %w", err)
 				}
 			}
