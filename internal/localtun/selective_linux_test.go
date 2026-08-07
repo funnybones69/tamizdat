@@ -183,6 +183,101 @@ func TestCleanupCollectsFailuresAndStillRemovesInactiveState(t *testing.T) {
 	}
 }
 
+func TestVerifyCleanupTreatsMissingFibTablesAsClean(t *testing.T) {
+	missingTable := func(family string) error {
+		t.Helper()
+		cmd := exec.Command("sh", "-c", "printf 'Error: "+family+": FIB table does not exist. Dump terminated\\n' >&2; exit 2")
+		out, err := cmd.CombinedOutput()
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+			t.Fatalf("missing-table emulator exit = %v, want status 2", err)
+		}
+		return &commandError{
+			command: "ip route show table 157",
+			output:  strings.TrimSpace(string(out)),
+			cause:   err,
+		}
+	}
+
+	r := &selectiveRouteController{}
+	r.output = func(_ context.Context, name string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case name == "nft":
+			return "", objectNotFoundError("nft list table")
+		case name == "ip" && strings.HasPrefix(joined, "rule show"):
+			return "", nil
+		case name == "ip" && joined == "route show table 157":
+			return "", missingTable("ipv4")
+		case name == "ip" && joined == "-6 route show table 157":
+			return "", missingTable("ipv6")
+		default:
+			t.Fatalf("unexpected cleanup verification command: %s %s", name, joined)
+			return "", nil
+		}
+	}
+	if err := r.verifyCleanup(context.Background()); err != nil {
+		t.Fatalf("verifyCleanup rejected absent FIB tables: %v", err)
+	}
+}
+
+func TestVerifyCleanupDetectsStaleIPv6Route(t *testing.T) {
+	r := &selectiveRouteController{}
+	var sawIPv6 bool
+	r.output = func(_ context.Context, name string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case name == "nft":
+			return "", objectNotFoundError("nft list table")
+		case name == "ip" && strings.HasPrefix(joined, "rule show"):
+			return "", nil
+		case name == "ip" && joined == "route show table 157":
+			return "", nil
+		case name == "ip" && joined == "-6 route show table 157":
+			sawIPv6 = true
+			return "default dev taml0", nil
+		default:
+			t.Fatalf("unexpected cleanup verification command: %s %s", name, joined)
+			return "", nil
+		}
+	}
+	err := r.verifyCleanup(context.Background())
+	if !sawIPv6 || err == nil || !strings.Contains(err.Error(), "ip -6 route table 157 still exists") {
+		t.Fatalf("verifyCleanup IPv6 result: saw=%v err=%v", sawIPv6, err)
+	}
+}
+
+func TestIPv6CleanupAlwaysTargetsPolicyTable(t *testing.T) {
+	const want = "ip -6 route del table 157 default dev taml0"
+	tests := []struct {
+		name string
+		run  func(*selectiveRouteController) error
+	}{
+		{name: "setup stale-state removal", run: func(r *selectiveRouteController) error { return r.Setup(context.Background()) }},
+		{name: "cleanup", run: func(r *selectiveRouteController) error { return r.Cleanup(context.Background()) }},
+		{name: "fail-closed", run: func(r *selectiveRouteController) error {
+			r.cfg.FailClosed = true
+			return r.EnterFailClosed(context.Background())
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var commands []string
+			r := commandMockController(&commands)
+			if err := tt.run(r); err != nil {
+				t.Fatal(err)
+			}
+			joined := strings.Join(commands, "\n")
+			if !strings.Contains(joined, want) {
+				t.Fatalf("IPv6 cleanup did not target table 157:\n%s", joined)
+			}
+			if strings.Contains(joined, "ip -6 route del default dev taml0") {
+				t.Fatalf("IPv6 cleanup still targets the main table:\n%s", joined)
+			}
+		})
+	}
+}
+
 func TestEnterFailClosedAtomicallyReplacesLegacyTable(t *testing.T) {
 	var commands []string
 	r := commandMockController(&commands)
