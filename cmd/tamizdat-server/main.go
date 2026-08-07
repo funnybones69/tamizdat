@@ -678,6 +678,7 @@ func reconcileLocalTUN(manager *localtun.Manager, server *tamizdat.Server, polic
 			TunAddress: cfg.TunAddress, MTU: cfg.MTU,
 			AutoRoute: cfg.AutoRoute, BypassPrivate: cfg.BypassPrivate,
 			BlockQUIC: cfg.BlockQUIC, Sniff: cfg.Sniff,
+			FailClosed: cfg.FailClosed,
 		})
 	}
 	return manager.Reconcile(configs)

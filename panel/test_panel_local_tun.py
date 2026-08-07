@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import os
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 from importlib.machinery import SourceFileLoader
 
@@ -42,6 +44,7 @@ class PanelLocalTUNTests(unittest.TestCase):
         self.assertFalse(user["local_enabled"])
         self.assertEqual(user["local_state"], "disabled")
         self.assertTrue(user["local_block_quic"])
+        self.assertFalse(user["local_fail_closed"])
 
         with self.assertRaisesRegex(ValueError, "local_iface is required"):
             self.panel.update_user(user["id"], {"local_enabled": True})
@@ -50,9 +53,11 @@ class PanelLocalTUNTests(unittest.TestCase):
             "user_kind": "local_tun",
             "local_enabled": True,
             "local_iface": "br-lan",
+            "local_fail_closed": True,
         })
         self.assertTrue(updated["local_enabled"])
         self.assertEqual(updated["local_iface"], "br-lan")
+        self.assertTrue(updated["local_fail_closed"])
         self.assertEqual(updated["outbound_tag"], "direct")
 
         ignored = self.panel.update_user(user["id"], {
@@ -90,12 +95,44 @@ class PanelLocalTUNTests(unittest.TestCase):
             version = con.execute(
                 "SELECT value FROM schema_meta WHERE key='schema_version'"
             ).fetchone()["value"]
-        self.assertEqual(version, "12")
+        self.assertEqual(version, "13")
         self.assertTrue({
             "user_kind", "local_enabled", "local_iface", "local_tun_name",
             "local_tun_addr", "local_tun_mtu", "local_auto_route",
-            "local_bypass_private", "local_block_quic", "local_sniff",
+            "local_bypass_private", "local_block_quic", "local_sniff", "local_fail_closed",
         }.issubset(cols))
+        with self.panel.db_conn() as con:
+            indexes = {row["name"] for row in con.execute("PRAGMA index_list(users)")}
+        self.assertIn("users_one_local_tun", indexes)
+
+    def test_concurrent_local_user_creation_returns_domain_error(self):
+        original = self.panel._new_unique_master_shortid
+        barrier = threading.Barrier(2)
+
+        def synchronized_shortid(con):
+            value = original(con)
+            barrier.wait(timeout=3)
+            return value
+
+        def create(index):
+            try:
+                return self.panel.create_user({
+                    "name": f"router-lan-{index}",
+                    "user_kind": "local_tun",
+                    "local_enabled": False,
+                })
+            except Exception as exc:
+                return exc
+
+        with mock.patch.object(self.panel, "_new_unique_master_shortid", side_effect=synchronized_shortid):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(create, range(2)))
+        users = [result for result in results if isinstance(result, dict)]
+        errors = [result for result in results if isinstance(result, Exception)]
+        self.assertEqual(len(users), 1, results)
+        self.assertEqual(len(errors), 1, results)
+        self.assertIsInstance(errors[0], ValueError)
+        self.assertIn("only one local TUN user", str(errors[0]))
 
 
     def test_local_runtime_marks_running_and_uses_tun_counters(self):
