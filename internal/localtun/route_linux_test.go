@@ -13,7 +13,7 @@ func TestNFTConfigMarksTCPAndUDPWithoutAutoMerge(t *testing.T) {
 	checks := []string{
 		`table inet tamizdat_local`,
 		`flags interval`,
-		`iifname "br-lan" meta l4proto { tcp, udp } meta mark set 0x9d`,
+		`iifname "br-lan" meta l4proto { tcp, udp } meta mark set (meta mark & 0xffffff00) | 0x9d`,
 		`10.0.0.0/8`,
 		`172.16.0.0/12`,
 		`192.168.0.0/16`,
