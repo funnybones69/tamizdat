@@ -119,7 +119,7 @@ func (r *selectiveRouteController) Setup(ctx context.Context) error {
 	// only tunnel-selected IPv6 destinations so clients immediately retry A.
 	if err := errors.Join(
 		r.commandIgnoreNotFound(ctx, nil, "ip", "-6", "rule", "del", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID),
-		r.commandIgnoreNotFound(ctx, nil, "ip", "-6", "route", "del", "default", "dev", r.cfg.TunName),
+		r.commandIgnoreNotFound(ctx, nil, "ip", "-6", "route", "del", "table", localTableID, "default", "dev", r.cfg.TunName),
 		r.commandIgnoreNotFound(ctx, nil, "ip", "rule", "del", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID),
 	); err != nil {
 		return r.rollbackSetup(err)
@@ -151,7 +151,7 @@ func (r *selectiveRouteController) Cleanup(ctx context.Context) error {
 	err := errors.Join(
 		r.cleanupManagedDNS(ctx),
 		r.commandIgnoreNotFound(ctx, nil, "ip", "-6", "rule", "del", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID),
-		r.commandIgnoreNotFound(ctx, nil, "ip", "-6", "route", "del", "default", "dev", r.cfg.TunName),
+		r.commandIgnoreNotFound(ctx, nil, "ip", "-6", "route", "del", "table", localTableID, "default", "dev", r.cfg.TunName),
 		r.commandIgnoreNotFound(ctx, nil, "ip", "rule", "del", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID),
 		r.commandIgnoreNotFound(ctx, nil, "ip", "route", "flush", "table", localTableID),
 	)
@@ -349,12 +349,42 @@ func (r *selectiveRouteController) verifyCleanup(ctx context.Context) error {
 	} else if strings.TrimSpace(out) != "" {
 		errs = append(errs, fmt.Errorf("ip rule priority %s still exists: %s", localPriority, out))
 	}
-	if out, err := r.commandOutput(ctx, "ip", "route", "show", "table", localTableID); err != nil {
-		errs = append(errs, err)
-	} else if strings.TrimSpace(out) != "" {
-		errs = append(errs, fmt.Errorf("ip route table %s still exists: %s", localTableID, out))
-	}
+	errs = append(errs,
+		r.verifyRouteTableEmpty(ctx, false),
+		r.verifyRouteTableEmpty(ctx, true),
+	)
 	return errors.Join(errs...)
+}
+
+func (r *selectiveRouteController) verifyRouteTableEmpty(ctx context.Context, ipv6 bool) error {
+	args := []string{"route", "show", "table", localTableID}
+	family := "ip"
+	if ipv6 {
+		args = append([]string{"-6"}, args...)
+		family = "ip -6"
+	}
+	out, err := r.commandOutput(ctx, "ip", args...)
+	if err != nil {
+		// iproute2 exits 2 on a pristine system when the policy table has never
+		// existed: "FIB table does not exist. Dump terminated". That is the
+		// desired cleanup postcondition, not a reason to block TUN startup.
+		if isRouteTableNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if strings.TrimSpace(out) != "" {
+		return fmt.Errorf("%s route table %s still exists: %s", family, localTableID, out)
+	}
+	return nil
+}
+
+func isRouteTableNotFound(err error) bool {
+	var commandErr *commandError
+	if !errors.As(err, &commandErr) || errors.Is(commandErr.cause, os.ErrNotExist) {
+		return false
+	}
+	return strings.Contains(strings.ToLower(commandErr.output), "does not exist")
 }
 
 func (r *selectiveRouteController) EnterFailClosed(ctx context.Context) error {
@@ -380,7 +410,7 @@ func (r *selectiveRouteController) EnterFailClosed(ctx context.Context) error {
 	return errors.Join(
 		r.cleanupManagedDNS(ctx),
 		r.commandIgnoreNotFound(ctx, nil, "ip", "-6", "rule", "del", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID),
-		r.commandIgnoreNotFound(ctx, nil, "ip", "-6", "route", "del", "default", "dev", r.cfg.TunName),
+		r.commandIgnoreNotFound(ctx, nil, "ip", "-6", "route", "del", "table", localTableID, "default", "dev", r.cfg.TunName),
 		r.commandIgnoreNotFound(ctx, nil, "ip", "rule", "del", "priority", localPriority, "fwmark", localRuleMark, "lookup", localTableID),
 		r.commandIgnoreNotFound(ctx, nil, "ip", "route", "flush", "table", localTableID),
 	)
