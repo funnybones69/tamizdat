@@ -142,7 +142,12 @@ func isCommandNotFound(err error) bool {
 		return false
 	}
 	text := strings.ToLower(commandErr.output)
-	return strings.Contains(text, "no such file or directory") || strings.Contains(text, "does not exist")
+	// "can't find device" is the iproute2 report for a netdev that is gone —
+	// for example a stale v6 policy route pointing at a TUN that the previous
+	// generation already removed. "no such process" is the RTNETLINK ESRCH
+	// report for a route/rule that was never installed in the table. Both are
+	// already-clean states that idempotent cleanup must tolerate.
+	return strings.Contains(text, "no such file or directory") || strings.Contains(text, "does not exist") || strings.Contains(text, "can't find device") || strings.Contains(text, "no such process")
 }
 
 func commandOutput(parent context.Context, name string, args ...string) (string, error) {
