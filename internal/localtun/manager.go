@@ -100,7 +100,7 @@ type Manager struct {
 	accounting Accounting
 	debug      bool
 	cancel     context.CancelFunc
-	done       chan struct{}
+	done       chan error
 	current    Config
 	generation atomic.Uint64
 }
@@ -157,7 +157,7 @@ func (m *Manager) Reconcile(configs []Config) error {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
+	done := make(chan error, 1)
 	m.cancel, m.done, m.current = cancel, done, *selected
 	m.publish(gen, statusFor(*selected, "starting", "", 0))
 	go m.supervise(ctx, done, gen, *selected)
@@ -183,30 +183,50 @@ func (m *Manager) stopLocked() error {
 	if m.cancel == nil {
 		return nil
 	}
+	if m.done == nil {
+		// The previous cleanup failed and its result was already consumed.
+		// Retry it, but retain ownership and refuse a new generation until all
+		// critical nft/RPDB invariants confirm that the old one is gone.
+		if err := cleanupStoppedGeneration(m.current); err != nil {
+			return fmt.Errorf("retry local TUN cleanup: %w", err)
+		}
+		m.cancel = nil
+		return nil
+	}
 	m.cancel()
 	done := m.done
-	if done != nil {
-		select {
-		case <-done:
-		case <-time.After(16 * time.Second):
-			// Never overlap two generations. A late cleanup from the old
-			// generation could otherwise delete the new nft table/ip rule and
-			// silently strand LAN clients. Keep the cancelled generation owned
-			// by the manager so a later reconcile can wait for it again.
-			return errors.New("local TUN shutdown timed out; refusing overlapping restart")
+	select {
+	case err := <-done:
+		m.done = nil
+		if err != nil {
+			return fmt.Errorf("local TUN cleanup failed; refusing overlapping restart: %w", err)
 		}
+	case <-time.After(16 * time.Second):
+		// Never overlap two generations. A late cleanup from the old
+		// generation could otherwise delete the new nft table/ip rule and
+		// silently strand LAN clients. Keep the cancelled generation owned
+		// by the manager so a later reconcile can wait for it again.
+		return errors.New("local TUN shutdown timed out; refusing overlapping restart")
 	}
 	m.cancel, m.done = nil, nil
 	return nil
 }
 
-func (m *Manager) supervise(ctx context.Context, done chan struct{}, generation uint64, cfg Config) {
-	defer close(done)
+func (m *Manager) supervise(ctx context.Context, done chan error, generation uint64, cfg Config) {
+	var finalErr error
+	defer func() {
+		done <- finalErr
+		close(done)
+	}()
 	lastLoggedError := ""
 	for {
 		startedAt := time.Now().Unix()
 		err := m.runOnce(ctx, generation, cfg, startedAt)
 		if ctx.Err() != nil {
+			// runOnce already tears down its engine. Re-check the host-wide
+			// nft/RPDB invariants with a fresh controller and report only that
+			// shutdown result to stopLocked, not an earlier runtime failure.
+			finalErr = cleanupStoppedGeneration(cfg)
 			return
 		}
 		if err == nil {
@@ -220,6 +240,7 @@ func (m *Manager) supervise(ctx context.Context, done chan struct{}, generation 
 		}
 		select {
 		case <-ctx.Done():
+			finalErr = cleanupStoppedGeneration(cfg)
 			return
 		case <-time.After(5 * time.Second):
 			m.publish(generation, statusFor(cfg, "starting", "", 0))
@@ -227,10 +248,21 @@ func (m *Manager) supervise(ctx context.Context, done chan struct{}, generation 
 	}
 }
 
+func cleanupStoppedGeneration(cfg Config) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return newRouteController(cfg).Cleanup(cleanupCtx)
+}
+
 func (m *Manager) runOnce(ctx context.Context, generation uint64, cfg Config, startedAt int64) error {
 	routes := newRouteController(cfg)
-	_ = routes.Cleanup(context.Background())
-	defer routes.Cleanup(context.Background())
+	if supervised, ok := routes.(supervisedRouteController); ok && cfg.FailClosed {
+		if err := supervised.EnterFailClosed(ctx); err != nil {
+			return fmt.Errorf("prepare local TUN killswitch: %w", err)
+		}
+	} else if err := routes.Cleanup(ctx); err != nil {
+		return fmt.Errorf("remove stale local TUN generation: %w", err)
+	}
 	client := NewClient(m.registry, m.rules, m.accounting, cfg.UserID, cfg.UserName, cfg.OutboundTag, cfg.Sniff)
 	defer client.Close()
 	opts := tunengine.Options{
@@ -239,6 +271,7 @@ func (m *Manager) runOnce(ctx context.Context, generation uint64, cfg Config, st
 		DialAttemptTimeout:      10 * time.Second,
 		DialConcurrency:         128,
 		DialActiveConcurrency:   2048,
+		UDPIdleTimeout:          4 * time.Minute,
 		DropPrivateDestinations: cfg.BypassPrivate,
 		DropQUIC:                cfg.BlockQUIC,
 		Debug:                   m.debug,
@@ -252,20 +285,86 @@ func (m *Manager) runOnce(ctx context.Context, generation uint64, cfg Config, st
 	}
 	engine, err := tunengine.New(opts)
 	if err != nil {
-		return err
+		return errors.Join(err, m.finishRoutes(ctx, routes, cfg, err))
 	}
-	defer engine.Close()
 	session, err := engine.Start(ctx, opts, client)
 	if err != nil {
-		return err
+		return errors.Join(err, engine.Close(), m.finishRoutes(ctx, routes, cfg, err))
 	}
-	<-ctx.Done()
+
+	var dnsDone <-chan error
+	var dnsErr func() error
+	var health func(context.Context) error
+	if supervised, ok := routes.(supervisedRouteController); ok {
+		dnsDone, dnsErr, health = supervised.DNSDone(), supervised.DNSError, supervised.Health
+	}
+	healthTicker := time.NewTicker(10 * time.Second)
+	defer healthTicker.Stop()
+	runtimeErr := waitRuntime(ctx, dnsDone, dnsErr, session.Done(), session.Err, healthTicker.C, health)
 	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := session.Stop(stopCtx); err != nil {
-		return fmt.Errorf("stop local TUN session: %w", err)
+	stopErr := session.Stop(stopCtx)
+	engineErr := engine.Close()
+	cleanupErr := m.finishRoutes(ctx, routes, cfg, runtimeErr)
+	if stopErr != nil {
+		stopErr = fmt.Errorf("stop local TUN session: %w", stopErr)
 	}
-	return nil
+	return errors.Join(runtimeErr, stopErr, engineErr, cleanupErr)
+}
+
+func (m *Manager) finishRoutes(ctx context.Context, routes routeController, cfg Config, runtimeErr error) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if ctx.Err() == nil && runtimeErr != nil && cfg.FailClosed {
+		if supervised, ok := routes.(supervisedRouteController); ok {
+			return supervised.EnterFailClosed(cleanupCtx)
+		}
+	}
+	return routes.Cleanup(cleanupCtx)
+}
+
+func waitRuntime(
+	ctx context.Context,
+	dnsDone <-chan error,
+	dnsErr func() error,
+	sessionDone <-chan struct{},
+	sessionErr func() error,
+	healthTick <-chan time.Time,
+	health func(context.Context) error,
+) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-dnsDone:
+			err := error(nil)
+			if dnsErr != nil {
+				err = dnsErr()
+			}
+			if err == nil {
+				err = errors.New("ChinaDNS exited unexpectedly")
+			}
+			return fmt.Errorf("ChinaDNS exited: %w", err)
+		case <-sessionDone:
+			err := error(nil)
+			if sessionErr != nil {
+				err = sessionErr()
+			}
+			if err == nil {
+				err = errors.New("TUN session exited unexpectedly")
+			}
+			return err
+		case <-healthTick:
+			if health != nil {
+				checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				err := health(checkCtx)
+				cancel()
+				if err != nil {
+					return fmt.Errorf("local TUN invariant check: %w", err)
+				}
+			}
+		}
+	}
 }
 
 func (m *Manager) publish(generation uint64, status map[string]any) {
@@ -278,6 +377,7 @@ func statusFor(cfg Config, state, errText string, startedAt int64) map[string]an
 	return map[string]any{
 		"user_id": cfg.UserID, "user_name": cfg.UserName, "state": state,
 		"interface": cfg.Interface, "tun_name": cfg.TunName, "auto_route": cfg.AutoRoute,
+		"fail_closed":  cfg.FailClosed,
 		"outbound_tag": cfg.OutboundTag,
 		"started_at":   startedAt, "error": errText,
 	}
