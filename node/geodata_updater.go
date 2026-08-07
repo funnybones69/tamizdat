@@ -91,10 +91,10 @@ type GeoDataUpdater struct {
 	// Logger is called for warnings and informational lines. nil ⇒ log.Printf.
 	Logger func(format string, args ...any)
 
-	// OnRefresh, when non-nil, is invoked after a successful download with
-	// the absolute path of the file that changed. The server uses this hook
-	// to trigger a SIGHUP-equivalent dispatcher rebuild without waiting for
-	// the operator. Errors from OnRefresh are logged at warning level only.
+	// OnRefresh, when non-nil, is invoked once per successfully downloaded file
+	// with its absolute path. Keep immediate work lightweight and coalesce any
+	// expensive batch-wide action: one refresh pass commonly updates both
+	// geoip.dat and geosite.dat. Panics from OnRefresh are logged and contained.
 	OnRefresh func(path string)
 
 	mu      sync.Mutex
@@ -313,9 +313,8 @@ func (u *GeoDataUpdater) maybeDownload(ctx context.Context, client *http.Client,
 	}
 	logf("geodata %s: refreshed %s from %s", name, target, url)
 	if u.OnRefresh != nil {
-		// Run hook on the same goroutine; callers should keep it lightweight
-		// (atomic-store of a Snapshot is enough; the slow path is reload
-		// itself, and that already runs under the SIGHUP goroutine in main).
+		// Run the per-file hook on the same goroutine. Callers that need a
+		// batch-wide slow path should debounce it outside the updater.
 		func() {
 			defer func() {
 				if r := recover(); r != nil {

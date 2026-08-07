@@ -48,6 +48,8 @@ import (
 	"github.com/funnybones69/tamizdat/pkg/tamizdat"
 )
 
+const geodataLocalTUNQuietPeriod = 2500 * time.Millisecond
+
 func main() {
 	var (
 		listenAddr           = flag.String("listen", "", "Listen address (overrides settings.inbound_listen_addr+inbound_listen_port)")
@@ -314,7 +316,13 @@ func main() {
 	// returns nil. Server keeps serving with whatever .dat is on disk (or the
 	// curated in-tree fallback if nothing is there yet).
 	geoCtx, geoCancel := context.WithCancel(context.Background())
-	defer geoCancel()
+	var geoLocalTUNReconcile *debouncedAction
+	defer func() {
+		geoCancel()
+		if geoLocalTUNReconcile != nil {
+			<-geoLocalTUNReconcile.Done()
+		}
+	}()
 	var geoUpdater *node.GeoDataUpdater
 	if !*noGeoDataUpdate {
 		// Phase 4 (2026-05-10): panel's inbound_geoip_url / inbound_geosite_url
@@ -325,6 +333,13 @@ func main() {
 		// time. Single-URL operators see no behavioural change.
 		geoIPMulti := splitGeoURLs(resolveStr("geoip-url", *geoIPURL, "inbound_geoip_url", ""))
 		geoSiteMulti := splitGeoURLs(resolveStr("geosite-url", *geoSiteURL, "inbound_geosite_url", ""))
+		geoLocalTUNReconcile = newDebouncedAction(geoCtx, geodataLocalTUNQuietPeriod, func() {
+			if err := reconcileLocalTUN(localTUNMgr, server, routingStore.Load()); err != nil {
+				log.Printf("geodata: post-refresh local TUN reconcile failed: %v", err)
+			} else {
+				log.Printf("geodata: refresh batch settled → local TUN reconciled")
+			}
+		})
 		geoUpdater = &node.GeoDataUpdater{
 			Dir:            *geoDataDir,
 			GeoIPURL:       *geoIPURL,
@@ -337,9 +352,7 @@ func main() {
 					log.Printf("geodata: post-refresh routing republish skipped: %v", err)
 				} else {
 					log.Printf("geodata: %s refreshed → routing republished (%d rules)", path, total)
-					if err := reconcileLocalTUN(localTUNMgr, server, routingStore.Load()); err != nil {
-						log.Printf("geodata: post-refresh local TUN reconcile failed: %v", err)
-					}
+					geoLocalTUNReconcile.Trigger()
 				}
 			},
 		}
@@ -393,6 +406,9 @@ func main() {
 		wgturnCancel()
 		wgturnShutdown()
 		geoCancel()
+		if geoLocalTUNReconcile != nil {
+			<-geoLocalTUNReconcile.Done()
+		}
 		fragPoCMgrCancel()
 		if fragPoCLn != nil {
 			_ = fragPoCLn.Close()
