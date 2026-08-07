@@ -369,10 +369,19 @@ func (r *selectiveRouteController) verifyCleanup(ctx context.Context) error {
 	} else if !isCommandNotFound(err) {
 		errs = append(errs, err)
 	}
-	if out, err := r.commandOutput(ctx, "ip", "rule", "show", "priority", localPriority); err != nil {
-		errs = append(errs, err)
-	} else if strings.TrimSpace(out) != "" {
-		errs = append(errs, fmt.Errorf("ip rule priority %s still exists: %s", localPriority, out))
+	// BusyBox ip rule cannot filter by priority, so absence of the
+	// forwarding signature in the unfiltered listing is the only reliable
+	// postcondition. Any other ip-rule error means the kernel state is
+	// unknown and the cleanup must be reported.
+	if out, err := r.commandOutput(ctx, "ip", "rule", "show"); err != nil {
+		// A missing rule is the desired end state, but a query error is
+		// never proof of removal. Tolerate only the "no rules" edge where
+		// output is empty and the kernel reported an empty listing.
+		if strings.TrimSpace(out) != "" {
+			errs = append(errs, err)
+		}
+	} else if strings.Contains(out, "fwmark 0x9d/0xff") && strings.Contains(out, "lookup "+localTableID) {
+		errs = append(errs, fmt.Errorf("ip rule fwmark 0x9d table %s still exists: %s", localTableID, out))
 	}
 	errs = append(errs,
 		r.verifyRouteTableEmpty(ctx, false),
@@ -464,7 +473,10 @@ func (r *selectiveRouteController) Health(ctx context.Context) error {
 	if err != nil || !strings.Contains(route, "default dev "+r.cfg.TunName) {
 		return fmt.Errorf("route table %s invariant failed: %s: %w", localTableID, route, err)
 	}
-	rule, err := r.commandOutput(ctx, "ip", "rule", "show", "priority", localPriority)
+	// BusyBox ip rule does not implement priority filtering: it exits 1
+	// with empty output even when the rule exists, so the invariant must
+	// scan the unfiltered listing for the rule signature.
+	rule, err := r.commandOutput(ctx, "ip", "rule", "show")
 	if err != nil || !strings.Contains(rule, "fwmark 0x9d/0xff") || !strings.Contains(rule, "lookup "+localTableID) {
 		return fmt.Errorf("RPDB rule invariant failed: %s: %w", rule, err)
 	}

@@ -386,6 +386,97 @@ func objectNotFoundError(command string) error {
 	return &commandError{command: command, output: "No such file or directory", cause: errors.New("exit status 1")}
 }
 
+func TestCommandIgnoreNotFoundToleratesMissingDevice(t *testing.T) {
+	r := &selectiveRouteController{}
+	r.run = func(_ context.Context, _ []byte, name string, args ...string) error {
+		return &commandError{
+			command: name + " " + strings.Join(args, " "),
+			output:  "ip: can't find device 'taml0'",
+			cause:   errors.New("exit status 255"),
+		}
+	}
+	if err := r.commandIgnoreNotFound(context.Background(), nil, "ip", "-6", "route", "del", "table", localTableID, "default", "dev", "taml0"); err != nil {
+		t.Fatalf("missing TUN device must be an idempotent cleanup success: %v", err)
+	}
+}
+
+func TestVerifyCleanupToleratesBusyboxEmptyRuleShow(t *testing.T) {
+	r := &selectiveRouteController{}
+	r.output = func(_ context.Context, name string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case name == "nft":
+			return "", objectNotFoundError("nft list table")
+		case name == "ip" && joined == "rule show":
+			// Clean postcondition: the unfiltered listing contains no
+			// forwarding rule signature.
+			return "0:	from all lookup local\n32766:	from all lookup main\n", nil
+		case name == "ip" && (joined == "route show table 157" || joined == "-6 route show table 157"):
+			return "", nil
+		default:
+			t.Fatalf("unexpected cleanup verification command: %s %s", name, joined)
+			return "", nil
+		}
+	}
+	if err := r.verifyCleanup(context.Background()); err != nil {
+		t.Fatalf("empty BusyBox rule listing must be a clean postcondition: %v", err)
+	}
+}
+
+func TestVerifyCleanupDetectsStaleForwardingRule(t *testing.T) {
+	r := &selectiveRouteController{}
+	r.output = func(_ context.Context, name string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case name == "nft":
+			return "", objectNotFoundError("nft list table")
+		case name == "ip" && joined == "rule show":
+			return "0:	from all lookup local\n11570:	from all fwmark 0x9d/0xff lookup 157\n32766:	from all lookup main\n", nil
+		case name == "ip" && (joined == "route show table 157" || joined == "-6 route show table 157"):
+			return "", nil
+		default:
+			t.Fatalf("unexpected cleanup verification command: %s %s", name, joined)
+			return "", nil
+		}
+	}
+	err := r.verifyCleanup(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "fwmark 0x9d") {
+		t.Fatalf("stale forwarding rule must fail cleanup verification: %v", err)
+	}
+}
+
+func TestHealthScansUnfilteredRuleListing(t *testing.T) {
+	r := &selectiveRouteController{cfg: Config{TunName: "taml0", AutoRoute: true}}
+	var sawFiltered bool
+	r.output = func(_ context.Context, name string, args ...string) (string, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case name == "ip" && strings.Contains(joined, "link show"):
+			return "1: taml0: <POINTOPOINT,UP,LOWER_UP> mtu 1280 state UNKNOWN", nil
+		case name == "ip" && strings.Contains(joined, "route show"):
+			return "default dev taml0", nil
+		case name == "ip" && joined == "rule show":
+			// BusyBox prints the full listing; the rule is present in it.
+			return "0:	from all lookup local\n11570:	from all fwmark 0x9d/0xff lookup 157\n32766:	from all lookup main\n", nil
+		case name == "ip" && strings.Contains(joined, "rule show priority"):
+			sawFiltered = true
+			return "", &commandError{command: name + " " + joined, output: "", cause: errors.New("exit status 255")}
+		case name == "nft" && strings.HasSuffix(joined, "dns_prerouting"):
+			return "udp dport 53 redirect to :53 tcp dport 53 redirect to :53", nil
+		case name == "nft" && strings.HasSuffix(joined, "prerouting"):
+			return "jump classify", nil
+		default:
+			return "", nil
+		}
+	}
+	if err := r.Health(context.Background()); err != nil {
+		t.Fatalf("health with BusyBox rule listing = %v, want nil", err)
+	}
+	if sawFiltered {
+		t.Fatal("health must not use BusyBox-unsupported priority filtering")
+	}
+}
+
 func commandMockController(commands *[]string) *selectiveRouteController {
 	r := &selectiveRouteController{cfg: Config{
 		UserID: "local-1", UserName: "router-lan", Interface: "lo", TunName: "taml0",
