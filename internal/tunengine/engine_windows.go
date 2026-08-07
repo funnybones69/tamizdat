@@ -4,6 +4,7 @@ package tunengine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -29,9 +30,13 @@ type Session struct {
 		Close()
 		Wait()
 	}
-	handler interface{ Close() }
-	dialer  *samizdatProxyDialer
-	closed  bool
+	handler  interface{ Close() }
+	dialer   *samizdatProxyDialer
+	done     chan struct{}
+	stopDone chan struct{}
+	stopOnce sync.Once
+	closed   bool
+	err      error
 }
 
 func New(opts Options) (*Engine, error) {
@@ -51,8 +56,12 @@ func Run(ctx context.Context, opts Options, client ProxyClient) error {
 	if err != nil {
 		return err
 	}
-	<-ctx.Done()
-	return sess.Stop(context.Background())
+	select {
+	case <-ctx.Done():
+		return sess.Stop(context.Background())
+	case <-sess.Done():
+		return errors.Join(sess.Err(), sess.Stop(context.Background()))
+	}
 }
 
 func (e *Engine) Start(ctx context.Context, opts Options, client ProxyClient) (*Session, error) {
@@ -89,7 +98,8 @@ func (e *Engine) Start(ctx context.Context, opts Options, client ProxyClient) (*
 		dialer.Stop()
 		return nil, fmt.Errorf("create netstack: %w", err)
 	}
-	sess := &Session{stack: stack, handler: handler, dialer: dialer}
+	sess := &Session{stack: stack, handler: handler, dialer: dialer, done: make(chan struct{}), stopDone: make(chan struct{})}
+	go sess.waitStack()
 	log.Printf("TUN up: name=%s type=%s mtu=%d", e.dev.Name(), e.dev.Type(), opts.MTU)
 	if opts.PostTunUp != nil {
 		if err := opts.PostTunUp(); err != nil {
@@ -119,35 +129,49 @@ func (e *Engine) ensureDevice(name string, mtu int) error {
 }
 
 func (s *Session) Stop(ctx context.Context) error {
-	s.mu.Lock()
-	if s.closed {
+	s.stopOnce.Do(func() {
+		s.mu.Lock()
+		s.closed = true
+		stack, handler, dialer := s.stack, s.handler, s.dialer
 		s.mu.Unlock()
-		return nil
-	}
-	s.closed = true
-	stack, handler, dialer := s.stack, s.handler, s.dialer
-	s.mu.Unlock()
-
-	done := make(chan struct{})
-	go func() {
-		if stack != nil {
-			stack.Close()
-			stack.Wait()
-		}
-		if handler != nil {
-			handler.Close()
-		}
-		if dialer != nil {
-			dialer.Stop()
-		}
-		close(done)
-	}()
+		go func() {
+			if stack != nil {
+				stack.Close()
+				<-s.done
+			}
+			if handler != nil {
+				handler.Close()
+			}
+			if dialer != nil {
+				dialer.Stop()
+			}
+			close(s.stopDone)
+		}()
+	})
 	select {
-	case <-done:
+	case <-s.stopDone:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (s *Session) waitStack() {
+	s.stack.Wait()
+	s.mu.Lock()
+	if !s.closed {
+		s.err = fmt.Errorf("tun2socks netstack stopped unexpectedly")
+	}
+	s.mu.Unlock()
+	close(s.done)
+}
+
+func (s *Session) Done() <-chan struct{} { return s.done }
+
+func (s *Session) Err() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.err
 }
 
 func (e *Engine) Close() error {

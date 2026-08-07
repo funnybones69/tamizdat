@@ -20,4 +20,6 @@ func (e *Engine) Start(context.Context, Options, ProxyClient) (*Session, error) 
 	return nil, errors.New("tun engine is only supported on Linux and Windows")
 }
 func (s *Session) Stop(context.Context) error { return nil }
+func (s *Session) Done() <-chan struct{}      { return nil }
+func (s *Session) Err() error                 { return nil }
 func (e *Engine) Close() error                { return nil }
