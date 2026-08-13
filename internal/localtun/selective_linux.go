@@ -29,8 +29,10 @@ const (
 	localDNSPID       = localDNSDir + "/chinadns.pid"
 	localDNSState     = localDNSDir + "/dnsmasq-state.json"
 	localDNSLog       = localDNSDir + "/chinadns.log"
+	localDNSCache     = localDNSDir + "/cache.db"
 	localDNSPort      = 5335
 	localChinaDNSPath = "/usr/bin/chinadns-ng"
+	localDNSUpstream  = "127.0.0.1#5053"
 )
 
 // selectiveRouteController installs only the policy-selected destinations in
@@ -618,8 +620,8 @@ func (r *selectiveRouteController) startManagedDNS(ctx context.Context, policy i
 			return err
 		}
 		groups = append(groups, fmt.Sprintf(
-			"group tam_r%d\ngroup-dnl %s\ngroup-upstream 127.0.0.1#5053,127.0.0.1#5054\ngroup-ipset inet@%s@r%d4,inet@%s@r%d6\n",
-			rule.index, listPath, localNFTTable, rule.index, localNFTTable, rule.index,
+			"group tam_r%d\ngroup-dnl %s\ngroup-upstream %s\ngroup-ipset inet@%s@r%d4,inet@%s@r%d6\n",
+			rule.index, listPath, localDNSUpstream, localNFTTable, rule.index, localNFTTable, rule.index,
 		))
 	}
 	// ChinaDNS gives later groups higher priority. Reverse declarations to
@@ -629,17 +631,22 @@ func (r *selectiveRouteController) startManagedDNS(ctx context.Context, policy i
 	}
 	config := fmt.Sprintf(`bind-addr 127.0.0.1
 bind-port %d
-china-dns 127.0.0.1#5053
-trust-dns 127.0.0.1#5054
+china-dns %s
+trust-dns %s
 default-tag chn
 cache 10000
-cache-stale 86400
-cache-refresh 20
-cache-db %s/cache.db
 
-%s`, localDNSPort, localDNSDir, strings.Join(groups, "\n"))
+%s`, localDNSPort, localDNSUpstream, localDNSUpstream, strings.Join(groups, "\n"))
 	if err := writeAtomic(localDNSConfig, []byte(config), 0o600); err != nil {
 		return err
+	}
+	// Do not resurrect answers from an older resolver configuration. In
+	// particular, a previous build allowed Google DoH to poison a domain that
+	// had already been placed in a tunnel rule. The cache is intentionally
+	// in-memory only; every managed-DNS generation starts from fresh upstream
+	// answers and cannot restore stale data after a reboot.
+	if err := os.Remove(localDNSCache); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove stale ChinaDNS cache: %w", err)
 	}
 
 	logFile, err := os.OpenFile(localDNSLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
@@ -742,6 +749,9 @@ func (r *selectiveRouteController) cleanupManagedDNS(ctx context.Context) error 
 	r.dnsCmd, r.dnsDone = nil, nil
 	if err := os.Remove(localDNSPID); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove ChinaDNS PID file: %w", err)
+	}
+	if err := os.Remove(localDNSCache); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove ChinaDNS cache: %w", err)
 	}
 	return nil
 }
