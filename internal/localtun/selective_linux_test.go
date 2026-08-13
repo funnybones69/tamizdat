@@ -518,7 +518,7 @@ func checkNFTSyntax(t *testing.T, config string) {
 			return
 		}
 		t.Fatalf("nft -c failed: %v: %s\n%s", err, out, config)
- 	}
+	}
 }
 
 func TestCleanDNSMasqSnapshotRemovesManagedFrontends(t *testing.T) {

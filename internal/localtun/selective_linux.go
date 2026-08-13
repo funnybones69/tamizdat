@@ -815,7 +815,7 @@ func cleanDNSMasqSnapshot(snapshot dnsmasqSnapshot) dnsmasqSnapshot {
 	servers := snapshot.Servers[:0]
 	for _, server := range uniqueStrings(snapshot.Servers) {
 		switch server {
-		case fmt.Sprintf("127.0.0.1#%d", localDNSPort), "127.0.0.1#5335":
+		case fmt.Sprintf("127.0.0.1#%d", localDNSPort), "127.0.0.1#5335", "127.0.0.1#65353":
 			// Current and legacy Tamizdat-managed ChinaDNS frontends are not
 			// original upstreams and must never survive into restoration state.
 			continue
