@@ -3,9 +3,12 @@ package localtun
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/funnybones69/tamizdat/internal/rulesdb"
 )
 
 func TestPrepareEnabledConfigAcceptsFallbackOnly(t *testing.T) {
@@ -131,4 +134,48 @@ func TestWaitRuntimeSupervisesEverySignal(t *testing.T) {
 			t.Fatalf("waitRuntime immediate session error = %v, health calls = %d", err, healthCalls)
 		}
 	})
+}
+
+func TestReconcileInvalidPolicyKeepsRunningGeneration(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	m := &Manager{
+		cancel: cancel,
+		done:   done,
+		current: Config{
+			UserID: "local-1", UserName: "router-lan", Enabled: true,
+			Interface: "br-lan", TunName: "taml0", TunAddress: "198.18.0.1/24",
+			MTU: 1280, AutoRoute: true,
+		},
+	}
+	go func() {
+		<-ctx.Done()
+		close(done)
+	}()
+
+	rules := make([]rulesdb.Loaded, 0, maxChinaDNSGroups+1)
+	for i := 0; i <= maxChinaDNSGroups; i++ {
+		rules = append(rules, rulesdb.Loaded{
+			Priority: i + 1, OutboundTag: "balancer",
+			Match: rulesdb.Match{
+				Domain: []string{"example.com"}, User: []string{"router-lan"},
+				Source: []string{fmt.Sprintf("10.0.%d.0/24", i)},
+			},
+		})
+	}
+	err := m.Reconcile([]Config{{
+		UserID: "local-1", UserName: "router-lan", Enabled: true,
+		Interface: "br-lan", TunName: "taml0", TunAddress: "198.18.0.1/24",
+		MTU: 1280, AutoRoute: true, Policy: &rulesdb.Snapshot{Rules: rules},
+	}})
+	if err == nil {
+		t.Fatal("Reconcile accepted policy above ChinaDNS group guardrail")
+	}
+	select {
+	case <-ctx.Done():
+		t.Fatal("invalid policy stopped the active local TUN generation")
+	default:
+	}
+	cancel()
+	<-done
 }

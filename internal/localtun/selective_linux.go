@@ -691,9 +691,15 @@ func (r *selectiveRouteController) installDNSMasqFrontend(ctx context.Context) e
 		StrictOrder:    strings.TrimSpace(strictRaw),
 		StrictOrderSet: strictErr == nil,
 	}
-	if len(snapshot.Servers) == 0 {
-		snapshot.Servers = []string{"127.0.0.1#5053", "127.0.0.1#5054"}
+	// If a previous generation was interrupted after installing its frontend,
+	// preserve the original snapshot instead of snapshotting our own port.
+	if state, err := os.ReadFile(localDNSState); err == nil {
+		var saved dnsmasqSnapshot
+		if json.Unmarshal(state, &saved) == nil && len(saved.Servers) > 0 {
+			snapshot = saved
+		}
 	}
+	snapshot = cleanDNSMasqSnapshot(snapshot)
 	state, err := json.Marshal(snapshot)
 	if err != nil {
 		return err
@@ -702,11 +708,11 @@ func (r *selectiveRouteController) installDNSMasqFrontend(ctx context.Context) e
 		return err
 	}
 	_, _ = optionalCommandOutput(ctx, "uci", "-q", "delete", "dhcp.@dnsmasq[0].server")
-	servers := append([]string{fmt.Sprintf("127.0.0.1#%d", localDNSPort)}, snapshot.Servers...)
-	for _, server := range uniqueStrings(servers) {
-		if err := runCommand(ctx, nil, "uci", "add_list", "dhcp.@dnsmasq[0].server="+server); err != nil {
-			return err
-		}
+	// Do not leave the original resolvers as parallel fallbacks.  A direct DoH
+	// answer can win the dnsmasq cache race and bypass ChinaDNS's group verdict,
+	// producing an IP that is then routed according to the wrong DNS response.
+	if err := runCommand(ctx, nil, "uci", "add_list", "dhcp.@dnsmasq[0].server="+fmt.Sprintf("127.0.0.1#%d", localDNSPort)); err != nil {
+		return err
 	}
 	if err := runCommand(ctx, nil, "uci", "set", "dhcp.@dnsmasq[0].strictorder=1"); err != nil {
 		return err
@@ -752,6 +758,7 @@ func restoreDNSMasqFrontend(ctx context.Context) error {
 	if err := json.Unmarshal(state, &snapshot); err != nil {
 		return fmt.Errorf("decode dnsmasq state: %w", err)
 	}
+	snapshot = cleanDNSMasqSnapshot(snapshot)
 	if len(snapshot.Servers) == 0 {
 		return errors.New("dnsmasq state has no upstream servers")
 	}
@@ -802,6 +809,25 @@ func stopManagedChinaDNS(cmd *exec.Cmd, done <-chan error) error {
 	case <-time.After(2 * time.Second):
 		return errors.New("ChinaDNS did not exit after SIGKILL")
 	}
+}
+
+func cleanDNSMasqSnapshot(snapshot dnsmasqSnapshot) dnsmasqSnapshot {
+	servers := snapshot.Servers[:0]
+	for _, server := range uniqueStrings(snapshot.Servers) {
+		switch server {
+		case fmt.Sprintf("127.0.0.1#%d", localDNSPort), "127.0.0.1#5335":
+			// Current and legacy Tamizdat-managed ChinaDNS frontends are not
+			// original upstreams and must never survive into restoration state.
+			continue
+		default:
+			servers = append(servers, server)
+		}
+	}
+	if len(servers) == 0 {
+		servers = []string{"127.0.0.1#5053", "127.0.0.1#5054"}
+	}
+	snapshot.Servers = servers
+	return snapshot
 }
 
 func stopStaleChinaDNS() error {

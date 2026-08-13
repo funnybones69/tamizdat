@@ -1,6 +1,7 @@
 package localtun
 
 import (
+	"fmt"
 	"net/netip"
 	"strings"
 	"testing"
@@ -45,6 +46,44 @@ func TestBuildIngressPolicyRejectsMultipleTunnelOutbounds(t *testing.T) {
 	_, err := buildIngressPolicy(snap, "router-lan")
 	if err == nil || !strings.Contains(err.Error(), "multiple tunnel outbounds") {
 		t.Fatalf("error = %v, want multiple-outbound rejection", err)
+	}
+}
+
+func TestBuildIngressPolicyAcceptsSevenDomainGroups(t *testing.T) {
+	rules := make([]rulesdb.Loaded, 0, 7)
+	for i := 0; i < 7; i++ {
+		rules = append(rules, rulesdb.Loaded{
+			Priority:    i + 1,
+			OutboundTag: "balancer",
+			Match: rulesdb.Match{
+				Domain: []string{fmt.Sprintf("rule-%d.example", i)},
+				User:   []string{"router-lan"},
+			},
+		})
+	}
+	policy, err := buildIngressPolicy(&rulesdb.Snapshot{Rules: rules}, "router-lan")
+	if err != nil {
+		t.Fatalf("buildIngressPolicy: %v", err)
+	}
+	if policy.dynamicGroups != 1 {
+		t.Fatalf("dynamic groups = %d, want 1 after coalescing", policy.dynamicGroups)
+	}
+	if policy.tunnelTag != "balancer" {
+		t.Fatalf("tunnel tag = %q, want balancer", policy.tunnelTag)
+	}
+}
+
+func TestBuildIngressPolicyDoesNotMergeAcrossDifferentAction(t *testing.T) {
+	snap := &rulesdb.Snapshot{Rules: []rulesdb.Loaded{
+		{Priority: 1, OutboundTag: "balancer", Match: rulesdb.Match{Domain: []string{"tunnel.example"}, User: []string{"router-lan"}}},
+		{Priority: 2, OutboundTag: "direct", Match: rulesdb.Match{Domain: []string{"direct.example"}, User: []string{"router-lan"}}},
+	}}
+	policy, err := buildIngressPolicy(snap, "router-lan")
+	if err != nil {
+		t.Fatalf("buildIngressPolicy: %v", err)
+	}
+	if policy.dynamicGroups != 2 || len(policy.rules) != 2 {
+		t.Fatalf("rules/groups = %d/%d, want 2/2", len(policy.rules), policy.dynamicGroups)
 	}
 }
 

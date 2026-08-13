@@ -156,6 +156,16 @@ func (m *Manager) Reconcile(configs []Config) error {
 		if err := prepareEnabledConfig(selected); err != nil {
 			return err
 		}
+		// Validate the selective classifier before stopping the currently
+		// working TUN. Previously policy errors were discovered in PostTunUp,
+		// after stopLocked had already removed nft/ip rules and the interface.
+		// A bad hot-reload therefore turned a recoverable configuration error
+		// into a complete local proxy outage.
+		if selected.AutoRoute {
+			if _, err := buildIngressPolicy(selected.Policy, selected.UserName); err != nil {
+				return err
+			}
+		}
 	}
 
 	m.mu.Lock()
