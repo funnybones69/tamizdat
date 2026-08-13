@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/funnybones69/tamizdat/internal/buildinfo"
 	"github.com/funnybones69/tamizdat/internal/wgturnclient"
 )
 
@@ -15,9 +16,9 @@ const (
 // Release builds override these values with -ldflags=-X. Explicit defaults
 // make an accidental developer build visibly non-release.
 var (
-	Version              = "dev"
-	BuildID              = "unversioned"
-	SourceID             = "unknown"
+	Version              = ""
+	BuildID              = ""
+	SourceID             = ""
 	BaselineBinarySHA256 = "9b1f302975f7cb5b615863c8b8782df1fa779f0cc435b369e3ef8e371f3ddcae"
 )
 
@@ -35,12 +36,25 @@ type Info struct {
 }
 
 func Current() Info {
+	build := buildinfo.Current(BinaryName)
+	version := Version
+	if version == "" {
+		version = build.Version
+	}
+	buildID := BuildID
+	if buildID == "" {
+		buildID = build.BuildID
+	}
+	sourceID := SourceID
+	if sourceID == "" {
+		sourceID = build.Commit
+	}
 	return Info{
 		Schema:               Schema,
 		Binary:               BinaryName,
-		Version:              Version,
-		BuildID:              BuildID,
-		SourceID:             SourceID,
+		Version:              version,
+		BuildID:              buildID,
+		SourceID:             sourceID,
 		BaselineBinarySHA256: BaselineBinarySHA256,
 		MaxRooms:             wgturnclient.MaxRooms,
 		MaxWorkersPerRoom:    wgturnclient.MaxWorkersPerRoom,

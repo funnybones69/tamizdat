@@ -77,7 +77,7 @@ class InstallerTests(unittest.TestCase):
 
     def test_package_script_builds_expected_asset_name(self):
         text = PACKAGE.read_text(encoding="utf-8")
-        for marker in ["tamizdat-${GOOS}-${GOARCH}.tar.gz", "install.sh", "SHA256SUMS", "tamizdat-server-app", "tamizdat-client", "tamizdat-panel.py", "uninstall.sh"]:
+        for marker in ["tamizdat-${GOOS}-${GOARCH}.tar.gz", "install.sh", "SHA256SUMS", "tamizdat-server-app", "tamizdat-client", "tamizdat-panel.py", "uninstall.sh", "build-meta.sh", "write-build-manifest.py", "build-info.json", "TAMIZDAT_LDFLAGS"]:
             self.assertIn(marker, text, f"package-linux.sh missing marker: {marker!r}")
 
 
