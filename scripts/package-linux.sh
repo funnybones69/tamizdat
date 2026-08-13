@@ -41,9 +41,9 @@ PY
 
 echo "== building server/client for ${GOOS}/${GOARCH} =="
 CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
-  go build -trimpath -ldflags="$TAMIZDAT_LDFLAGS" -o "$STAGE/tamizdat/tamizdat-server-app" ./cmd/tamizdat-server
+  go build -buildvcs=false -trimpath -ldflags="$TAMIZDAT_LDFLAGS" -o "$STAGE/tamizdat/tamizdat-server-app" ./cmd/tamizdat-server
 CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
-  go build -trimpath -ldflags='-s -w' -o "$STAGE/tamizdat/tamizdat-client" ./cmd/tamizdat-client
+  go build -buildvcs=false -trimpath -ldflags='-s -w' -o "$STAGE/tamizdat/tamizdat-client" ./cmd/tamizdat-client
 
 cp "$ROOT/panel/tamizdat-panel.py" "$STAGE/tamizdat/tamizdat-panel.py"
 GOOS="$GOOS" GOARCH="$GOARCH" python3 "$ROOT/scripts/write-build-manifest.py" \
