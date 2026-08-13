@@ -138,7 +138,7 @@ func TestWaitRuntimeSupervisesEverySignal(t *testing.T) {
 
 func TestReconcileInvalidPolicyKeepsRunningGeneration(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
+	done := make(chan error)
 	m := &Manager{
 		cancel: cancel,
 		done:   done,
