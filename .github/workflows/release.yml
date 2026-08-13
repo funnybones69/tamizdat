@@ -52,10 +52,10 @@ jobs:
           for ARCH in amd64 arm64; do
             echo "==> building linux/${ARCH}"
             CGO_ENABLED=0 GOOS=linux GOARCH="${ARCH}" \
-              go build -trimpath -ldflags="${TAMIZDAT_LDFLAGS}" \
+              go build -buildvcs=false -trimpath -ldflags="${TAMIZDAT_LDFLAGS}" \
               -o "dist/tamizdat-server-app-linux-${ARCH}" ./cmd/tamizdat-server
             CGO_ENABLED=0 GOOS=linux GOARCH="${ARCH}" \
-              go build -trimpath -ldflags='-s -w' \
+              go build -buildvcs=false -trimpath -ldflags='-s -w' \
               -o "dist/tamizdat-client-linux-${ARCH}" ./cmd/tamizdat-client
             stage="$(mktemp -d)"
             cp "dist/tamizdat-server-app-linux-${ARCH}" "${stage}/tamizdat-server-app"
