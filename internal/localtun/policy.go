@@ -12,6 +12,7 @@ import (
 )
 
 const (
+	// The OpenWrt ChinaDNS-NG build has six user-group slots.
 	maxChinaDNSGroups = 6
 	// Large static interval batches make nft itself consume more than 100 MiB
 	// on small OpenWrt targets. Domain-heavy lists must use ChinaDNS instead.
@@ -200,6 +201,17 @@ func buildIngressPolicy(snap *rulesdb.Snapshot, userName string) (ingressPolicy,
 				loaded.Priority, n, maxStaticPrefixesPerRule,
 			)
 		}
+		// ChinaDNS-NG on OpenWrt exposes only six user groups. Coalesce adjacent
+		// domain-only rules when their non-destination match and action are
+		// identical. Since no differently-acting rule sits between them, their
+		// union preserves first-match-wins semantics while consuming one group.
+		if len(rule.domains) > 0 && len(out.rules) > 0 {
+			previous := &out.rules[len(out.rules)-1]
+			if mergeableDomainRules(*previous, rule) {
+				previous.domains = appendUniqueDomains(previous.domains, rule.domains)
+				continue
+			}
+		}
 		if len(rule.domains) > 0 {
 			out.dynamicGroups++
 			if out.dynamicGroups > maxChinaDNSGroups {
@@ -209,6 +221,53 @@ func buildIngressPolicy(snap *rulesdb.Snapshot, userName string) (ingressPolicy,
 		out.rules = append(out.rules, rule)
 	}
 	return out, nil
+}
+
+func mergeableDomainRules(a, b ingressRule) bool {
+	return len(a.domains) > 0 && len(b.domains) > 0 &&
+		len(a.ipv4)+len(a.ipv6) == 0 && len(b.ipv4)+len(b.ipv6) == 0 &&
+		a.action == b.action && a.network == b.network &&
+		equalPorts(a.ports, b.ports) &&
+		equalPrefixes(a.source4, b.source4) && equalPrefixes(a.source6, b.source6)
+}
+
+func appendUniqueDomains(dst, src []string) []string {
+	seen := make(map[string]struct{}, len(dst)+len(src))
+	for _, domain := range dst {
+		seen[domain] = struct{}{}
+	}
+	for _, domain := range src {
+		if _, ok := seen[domain]; ok {
+			continue
+		}
+		seen[domain] = struct{}{}
+		dst = append(dst, domain)
+	}
+	return dst
+}
+
+func equalPorts(a, b []ingressPortRange) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalPrefixes(a, b []netip.Prefix) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func listAllows(values []string, wanted string) bool {

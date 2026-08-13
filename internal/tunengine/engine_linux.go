@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/xjasonlyu/tun2socks/v2/core"
 	"github.com/xjasonlyu/tun2socks/v2/core/device"
@@ -118,14 +120,30 @@ func (e *Engine) ensureDevice(name string, mtu int) error {
 	if e.dev != nil {
 		return nil
 	}
-	dev, err := tun.Open(name, uint32(mtu))
-	if err != nil {
-		return fmt.Errorf("open tun device %q: %w", name, err)
+	var dev device.Device
+	var err error
+	for attempt := 1; attempt <= 20; attempt++ {
+		dev, err = tun.Open(name, uint32(mtu))
+		if err == nil {
+			break
+		}
+		// OpenWrt can keep a just-closed named TUN busy briefly while the old
+		// netstack reader exits. A SIGHUP rebuild used to hit EBUSY once, abort
+		// the new generation, and leave nft/policy routing removed until a full
+		// service restart. Retry only this transient kernel condition.
+		if !transientTUNBusy(err) || attempt == 20 {
+			return fmt.Errorf("open tun device %q: %w", name, err)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 	e.dev = dev
 	e.name = name
 	e.mtu = mtu
 	return nil
+}
+
+func transientTUNBusy(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "device or resource busy")
 }
 
 func (s *Session) Stop(ctx context.Context) error {

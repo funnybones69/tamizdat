@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"strings"
 	"sync"
@@ -128,6 +129,7 @@ func (c *Client) serveTCP(conn net.Conn, req *node.Request) {
 	upstream, err := dialer.DialContext(dialCtx, node.NetworkTCP, req.Address())
 	cancel()
 	if err != nil {
+		log.Printf("local TUN outbound %q TCP dial %s failed: %v", resolvedTag, req.Address(), err)
 		return
 	}
 	defer upstream.Close()
@@ -157,6 +159,7 @@ func (c *Client) DialPacketRequest(ctx context.Context, req *node.Request) (net.
 	}
 	pc, err := dialer.DialPacket(ctx, request.Address())
 	if err != nil {
+		log.Printf("local TUN outbound %q UDP dial %s failed: %v", resolvedTag, request.Address(), err)
 		_ = dialer.Close()
 		return nil, err
 	}

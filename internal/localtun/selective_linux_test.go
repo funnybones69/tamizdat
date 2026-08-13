@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/netip"
 	"os/exec"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -517,5 +518,30 @@ func checkNFTSyntax(t *testing.T, config string) {
 			return
 		}
 		t.Fatalf("nft -c failed: %v: %s\n%s", err, out, config)
+ 	}
+}
+
+func TestCleanDNSMasqSnapshotRemovesManagedFrontends(t *testing.T) {
+	snapshot := cleanDNSMasqSnapshot(dnsmasqSnapshot{
+		Servers:        []string{"127.0.0.1#5335", "127.0.0.1#65353", "127.0.0.1#5053", "127.0.0.1#5054", "127.0.0.1#5053"},
+		StrictOrder:    "1",
+		StrictOrderSet: true,
+	})
+	want := []string{"127.0.0.1#5053", "127.0.0.1#5054"}
+	if !reflect.DeepEqual(snapshot.Servers, want) {
+		t.Fatalf("servers = %v, want %v", snapshot.Servers, want)
+	}
+	if snapshot.StrictOrder != "1" || !snapshot.StrictOrderSet {
+		t.Fatalf("strict-order metadata changed: %+v", snapshot)
+	}
+}
+
+func TestCleanDNSMasqSnapshotUsesDoHDefaultsWhenOnlyManaged(t *testing.T) {
+	snapshot := cleanDNSMasqSnapshot(dnsmasqSnapshot{
+		Servers: []string{"127.0.0.1#65353"},
+	})
+	want := []string{"127.0.0.1#5053", "127.0.0.1#5054"}
+	if !reflect.DeepEqual(snapshot.Servers, want) {
+		t.Fatalf("servers = %v, want %v", snapshot.Servers, want)
 	}
 }
