@@ -122,6 +122,12 @@ info_cmd() {
 }
 
 version_cmd() {
+  if [[ -x "$SERVER_BIN" ]]; then
+    "$SERVER_BIN" --version 2>/dev/null || true
+  fi
+  if [[ -r "${ETC_DIR}/build-info.json" ]]; then
+    echo "Manifest: ${ETC_DIR}/build-info.json"
+  fi
   for f in "$SERVER_BIN" "$CLIENT_BIN" "$PANEL_BIN" "$UNINSTALL_BIN"; do
     [[ -e "$f" ]] || continue
     if command -v sha256sum >/dev/null 2>&1; then
@@ -146,7 +152,7 @@ Usage:
   tamizdat stop            Stop panel + server
   tamizdat uninstall [--purge]
                            Remove app/services; --purge also removes /etc/tamizdat
-  tamizdat version         Print installed file hashes
+  tamizdat version         Print build identity and installed file hashes
   tamizdat help            Show this help
 
 Secrets are not printed. Client profiles remain in /etc/tamizdat or root-only

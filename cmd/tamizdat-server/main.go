@@ -36,6 +36,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/funnybones69/tamizdat/internal/buildinfo"
 	"github.com/funnybones69/tamizdat/internal/localtun"
 	obreg "github.com/funnybones69/tamizdat/internal/outbounds"
 	"github.com/funnybones69/tamizdat/internal/proxyproto"
@@ -89,13 +90,22 @@ func main() {
 		noGeoDataUpdate      = flag.Bool("no-geodata-update", false, "Disable network downloads of geoip.dat / geosite.dat. Server uses whatever is already on disk in --geodata-dir, or falls back to curated in-tree shortlist.")
 		replayWindow         = flag.Duration("replay-window", 5*time.Minute, "Server-side replay-guard retention window. Each accepted handshake's replay key (SHA-256(SessionID||eph_pub)[:16]) is held for this duration; second handshake reusing the tuple within the window is rejected.")
 		disableCertPad       = flag.Bool("disable-cert-padding", false, "Skip the dummy CA-style cert-chain padding pass. Useful when the inbound cert is a real LE / commercial CA chain that already exceeds the ~4 KB target; padding would produce a Frankenstein chain. Default false.")
+		_                    = flag.Bool("version", false, "Print immutable build identity and exit")
+		_                    = flag.Bool("version-json", false, "Print machine-readable build identity and exit")
 	)
+	if mode := earlyServerInfoFlag(os.Args[1:]); mode != "" {
+		if err := writeServerBuildInfo(mode, os.Stdout); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	flag.Parse()
 
 	if *genKeys {
 		generateKeys()
 		return
 	}
+	log.Printf("build: %s", buildinfo.VersionLine("tamizdat-server-app"))
 
 	// Pre-load inbound settings from SQLite so unset CLI flags can fall back
 	// to the panel-managed values. The DB is opened twice (here, then again
@@ -509,6 +519,38 @@ func main() {
 	if err := server.ListenAndServe(); err != nil {
 		cleanupPID()
 		log.Fatalf("server error: %v", err)
+	}
+}
+
+// earlyServerInfoFlag runs before normal flag parsing so fleet inventory can
+// inspect mixed server generations without supplying cert/key/runtime flags.
+func earlyServerInfoFlag(args []string) string {
+	for _, arg := range args {
+		switch arg {
+		case "-version", "--version", "-version=true", "--version=true":
+			return "version"
+		case "-version-json", "--version-json", "-version-json=true", "--version-json=true",
+			"-build-info-json", "--build-info-json", "-build-info-json=true", "--build-info-json=true":
+			return "version-json"
+		}
+	}
+	return ""
+}
+
+func writeServerBuildInfo(mode string, out io.Writer) error {
+	switch mode {
+	case "version":
+		_, err := fmt.Fprintln(out, buildinfo.VersionLine("tamizdat-server-app"))
+		return err
+	case "version-json":
+		raw, err := buildinfo.JSON("tamizdat-server-app")
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(out, string(raw))
+		return err
+	default:
+		return fmt.Errorf("unknown build info mode %q", mode)
 	}
 }
 

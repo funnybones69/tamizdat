@@ -17,6 +17,8 @@ esac
 
 cd "$ROOT"
 mkdir -p "$OUT_DIR" "$STAGE/tamizdat"
+# shellcheck source=build-meta.sh
+source "$ROOT/scripts/build-meta.sh"
 
 copy_install_script() {
   local dst=$1
@@ -39,11 +41,16 @@ PY
 
 echo "== building server/client for ${GOOS}/${GOARCH} =="
 CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
-  go build -trimpath -ldflags='-s -w' -o "$STAGE/tamizdat/tamizdat-server-app" ./cmd/tamizdat-server
+  go build -trimpath -ldflags="$TAMIZDAT_LDFLAGS" -o "$STAGE/tamizdat/tamizdat-server-app" ./cmd/tamizdat-server
 CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
   go build -trimpath -ldflags='-s -w' -o "$STAGE/tamizdat/tamizdat-client" ./cmd/tamizdat-client
 
 cp "$ROOT/panel/tamizdat-panel.py" "$STAGE/tamizdat/tamizdat-panel.py"
+GOOS="$GOOS" GOARCH="$GOARCH" python3 "$ROOT/scripts/write-build-manifest.py" \
+  --output "$STAGE/tamizdat/build-info.json" \
+  --server "$STAGE/tamizdat/tamizdat-server-app" \
+  --panel "$STAGE/tamizdat/tamizdat-panel.py" \
+  --client "$STAGE/tamizdat/tamizdat-client"
 copy_install_script "$STAGE/tamizdat/install.sh"
 cp "$ROOT/scripts/uninstall.sh" "$STAGE/tamizdat/uninstall.sh"
 cp "$ROOT/scripts/tamizdat" "$STAGE/tamizdat/tamizdat"
@@ -56,6 +63,7 @@ chmod 0755 "$STAGE/tamizdat/tamizdat-server-app" \
            "$STAGE/tamizdat/uninstall.sh" \
            "$STAGE/tamizdat/tamizdat"
 chmod 0644 "$STAGE/tamizdat/README.md" "$STAGE/tamizdat/INSTALL.md" "$STAGE/tamizdat/OPENWRT.md" "$STAGE/tamizdat/LICENSE"
+chmod 0644 "$STAGE/tamizdat/build-info.json"
 
 asset="$OUT_DIR/tamizdat-${GOOS}-${GOARCH}.tar.gz"
 tar --sort=name --owner=0 --group=0 --numeric-owner --mtime='UTC 2026-01-01' -C "$STAGE" -czf "$asset" tamizdat

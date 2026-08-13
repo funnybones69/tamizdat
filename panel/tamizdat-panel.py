@@ -19,6 +19,8 @@ import hmac
 from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, unquote, parse_qs, quote
 
+SIGHUP_SIGNAL = getattr(signal, "SIGHUP", 1)
+
 CONFIG_PATH = os.environ.get("TAMIZDAT_PANEL_DB", "/etc/tamizdat/data.db")
 PANEL_DB = CONFIG_PATH
 PANEL_PORT = int(os.environ.get("TAMIZDAT_PANEL_PORT", "8888"))
@@ -30,6 +32,8 @@ CLASH_API = os.environ.get("TAMIZDAT_PANEL_CLASH_API", "http://127.0.0.1:9090")
 TAMIZDAT_EXPVAR_URL = os.environ.get("TAMIZDAT_PANEL_EXPVAR_URL", "http://127.0.0.1:6060/debug/vars").strip()
 SERVICE_NAME = os.environ.get("TAMIZDAT_PANEL_SERVICE_NAME", "tamizdat-server")
 SERVER_PIDFILE = os.environ.get("TAMIZDAT_PANEL_SERVER_PIDFILE", "/run/tamizdat-server.pid")
+SERVER_BIN = os.environ.get("TAMIZDAT_SERVER_BIN", "").strip()
+BUILD_INFO_PATH = os.environ.get("TAMIZDAT_BUILD_INFO", "/etc/tamizdat/build-info.json").strip()
 LEGACY_CONFIG_PATH = os.environ.get("TAMIZDAT_PANEL_LEGACY_CONFIG", "/etc/anytls/config.json")
 SESSION_TTL = 3600
 
@@ -245,10 +249,17 @@ DEFAULT_SETTINGS = {
     "wgturn_outbound_tag":         "",
 }
 
-# Panel version surfaced via GET /api/panel for the Settings block. Bumped
-# manually on releases; reviewer can override with TAMIZDAT_PANEL_VERSION env
-# (e.g. CI stamping a git short SHA).
-PANEL_VERSION = os.environ.get("TAMIZDAT_PANEL_VERSION", "1.0")
+# Release installers stamp these from the server build identity. Unstamped
+# source/manual copies remain visibly dev and are still uniquely identified by
+# the panel file SHA-256 returned from GET /api/panel.
+PANEL_VERSION = os.environ.get("TAMIZDAT_PANEL_VERSION", "dev")
+PANEL_BUILD_ID = os.environ.get("TAMIZDAT_PANEL_BUILD_ID", "").strip()
+PANEL_COMMIT = os.environ.get("TAMIZDAT_PANEL_COMMIT", "").strip()
+PANEL_BUILD_TIME = os.environ.get("TAMIZDAT_PANEL_BUILD_TIME", "").strip()
+
+_SERVER_BUILD_CACHE = {"signature": None, "data": None}
+_SERVER_BUILD_LOCK = threading.Lock()
+_BUILD_MANIFEST_CACHE = {"signature": None, "data": None}
 
 _db_lock = threading.RLock()
 
@@ -705,6 +716,116 @@ def managed_service_action(action):
     if init_script:
         return subprocess.Popen([init_script, action], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return subprocess.Popen(["systemctl", action, SERVICE_NAME])
+
+
+def _sha256_file(path):
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return ""
+
+
+def build_manifest():
+    path = BUILD_INFO_PATH
+    if not path:
+        return {}
+    try:
+        st = os.stat(path)
+        signature = (path, st.st_size, st.st_mtime_ns)
+    except OSError:
+        return {}
+    if _BUILD_MANIFEST_CACHE.get("signature") == signature:
+        return dict(_BUILD_MANIFEST_CACHE.get("data") or {})
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or data.get("schema") != 1:
+            data = {}
+    except (OSError, ValueError):
+        data = {}
+    _BUILD_MANIFEST_CACHE.update({"signature": signature, "data": dict(data)})
+    return data
+
+
+def panel_build_info():
+    path = os.path.realpath(__file__)
+    sha256 = _sha256_file(path)
+    manifest = build_manifest()
+    expected = ((manifest.get("artifacts") or {}).get("panel") or {}).get("sha256", "")
+    return {
+        "schema": 1,
+        "component": "tamizdat-panel",
+        "version": PANEL_VERSION if PANEL_VERSION != "dev" else (manifest.get("version") or "dev"),
+        "build_id": PANEL_BUILD_ID or manifest.get("build_id") or (("sha256-" + sha256[:12]) if sha256 else "unknown"),
+        "commit": PANEL_COMMIT or manifest.get("commit") or "unknown",
+        "build_time": PANEL_BUILD_TIME or manifest.get("build_time") or "unknown",
+        "sha256": sha256,
+        "manifest_sha256": expected,
+        "manifest_match": (sha256 == expected) if expected else None,
+        "path": path,
+    }
+
+
+def _server_binary_candidates():
+    values = [
+        SERVER_BIN,
+        "/usr/bin/tamizdat-server-app",
+        "/usr/local/bin/tamizdat-server-app",
+        "/usr/local/tamizdat/bin/tamizdat-server-app",
+    ]
+    out = []
+    for value in values:
+        value = str(value or "").strip()
+        if value and value not in out:
+            out.append(value)
+    return out
+
+
+def server_build_info():
+    path = next((p for p in _server_binary_candidates() if os.path.isfile(p) and os.access(p, os.X_OK)), "")
+    if not path:
+        return {"schema": 1, "component": "tamizdat-server-app", "version": "unknown", "build_id": "not-found"}
+    try:
+        st = os.stat(path)
+        signature = (path, st.st_size, st.st_mtime_ns)
+    except OSError:
+        signature = (path, 0, 0)
+    with _SERVER_BUILD_LOCK:
+        if _SERVER_BUILD_CACHE.get("signature") == signature and _SERVER_BUILD_CACHE.get("data"):
+            return dict(_SERVER_BUILD_CACHE["data"])
+        sha256 = _sha256_file(path)
+        data = None
+        try:
+            r = subprocess.run([path, "--version-json"], capture_output=True, text=True, timeout=3)
+            if r.returncode == 0:
+                parsed = json.loads((r.stdout or "").strip())
+                if isinstance(parsed, dict) and parsed.get("binary") == "tamizdat-server-app":
+                    data = dict(parsed)
+        except Exception:
+            data = None
+        if data is None:
+            data = {
+                "schema": 1,
+                "binary": "tamizdat-server-app",
+                "version": "legacy",
+                "build_id": ("sha256-" + sha256[:12]) if sha256 else "unknown",
+                "commit": "unknown",
+                "build_time": "unknown",
+                "dirty": None,
+            }
+        data["component"] = "tamizdat-server-app"
+        data["sha256"] = sha256
+        manifest = build_manifest()
+        expected = ((manifest.get("artifacts") or {}).get("server") or {}).get("sha256", "")
+        data["manifest_sha256"] = expected
+        data["manifest_match"] = (sha256 == expected) if expected else None
+        data["path"] = path
+        _SERVER_BUILD_CACHE.update({"signature": signature, "data": dict(data)})
+        return data
 
 
 def _live_outbounds_from_expvar():
@@ -4350,27 +4471,51 @@ def save_config(config):
     _sighup_server()
 
 
+def _server_pids_from_proc(proc_root="/proc"):
+    """Find the server without relying on procps tools absent on OpenWrt."""
+    pids = []
+    try:
+        entries = os.listdir(proc_root)
+    except OSError:
+        return pids
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(os.path.join(proc_root, entry, "cmdline"), "rb") as f:
+                argv0 = f.read().split(b"\0", 1)[0].decode("utf-8", "replace")
+        except OSError:
+            continue
+        executable = argv0.replace("\\", "/").rsplit("/", 1)[-1]
+        if executable == "tamizdat-server-app":
+            pids.append(int(entry))
+    return sorted(pids)
+
+
 def _sighup_server():
     try:
         if SERVER_PIDFILE and os.path.exists(SERVER_PIDFILE):
             with open(SERVER_PIDFILE, "r", encoding="utf-8") as f:
                 pid_s = f.read().strip()
             if pid_s:
-                os.kill(int(pid_s), signal.SIGHUP)
+                os.kill(int(pid_s), SIGHUP_SIGNAL)
                 return
     except Exception as e:
         print(f"pidfile SIGHUP warning: {e}")
     try:
-        # 2026-05-13: must use `-f` (match full cmdline) not `-x` (match exe
-        # name only). Linux's TASK_COMM_LEN caps the kernel-visible name at
-        # 15 chars; `tamizdat-server-app` is 19, so `pkill -x` silently
-        # matches zero processes — the operator saves a routing rule in the
-        # panel UI, the panel "successfully" sends SIGHUP, the server never
-        # actually reloads, and the rule looks ignored. -f matches against
-        # /proc/<pid>/cmdline which has no length cap.
-        subprocess.run(["pkill", "-HUP", "-f", "/usr/local/bin/tamizdat-server-app"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+        # OpenWrt may provide pgrep but not pkill, and the install path differs
+        # between OpenWrt (/usr/bin) and systemd (/usr/local/bin).  Inspect
+        # argv[0] in /proc and signal the exact executable name ourselves.
+        pids = _server_pids_from_proc()
+        for pid in pids:
+            try:
+                os.kill(pid, SIGHUP_SIGNAL)
+            except ProcessLookupError:
+                pass
+        if not pids:
+            print("server SIGHUP warning: tamizdat-server-app process not found")
     except Exception as e:
-        print(f"pkill SIGHUP warning: {e}")
+        print(f"process scan SIGHUP warning: {e}")
 
 
 def _set_outbound_bind_iface(tag, bind_iface):
@@ -6162,8 +6307,18 @@ body.nav-open .nav-backdrop{display:block;opacity:1}
 
                 <div class="field">
                   <div class="field-lbl">
-                    <div class="lbl">Panel version <span class="tag tag-readonly">readonly</span></div>
-                    <div class="hint">Build info.</div>
+                    <div class="lbl">Server build <span class="tag tag-readonly">readonly</span></div>
+                    <div class="hint">Version, build ID and source commit reported by the installed binary.</div>
+                  </div>
+                  <div class="field-ctrl">
+                    <input type="text" id="setServerVersion" class="mono" readonly>
+                  </div>
+                </div>
+
+                <div class="field">
+                  <div class="field-lbl">
+                    <div class="lbl">Panel build <span class="tag tag-readonly">readonly</span></div>
+                    <div class="hint">Version/build ID plus the panel file identity.</div>
                   </div>
                   <div class="field-ctrl">
                     <input type="text" id="setPanelVersion" class="mono" readonly>
@@ -7834,6 +7989,13 @@ async function loadSettings(){
     const p=await pr.json();
     if(p.error){toast(p.error)}
     else{
+      const buildLabel = (b) => {
+        if(!b) return '?';
+        const v = b.version || 'unknown';
+        const id = b.build_id || 'unknown';
+        const commit = (b.commit && b.commit !== 'unknown') ? String(b.commit).slice(0,12) : '';
+        return v+' · '+id+(commit ? ' · '+commit : '');
+      };
       gid('setPanelHostname').value = p.hostname || '';
       gid('setPanelPort').value     = p.port || 8888;
       gid('setPanelBasePath').value = p.base_path || '';
@@ -7842,7 +8004,8 @@ async function loadSettings(){
       gid('setPanelAdmins').value = p.admin_users || '';
       gid('setPanelServiceName').value  = p.service_name || '';
       gid('setTestTarget').value    = p.test_target || 'http://www.gstatic.com/generate_204';
-      gid('setPanelVersion').value  = p.version || '?';
+      gid('setServerVersion').value = buildLabel(p.server_build);
+      gid('setPanelVersion').value  = buildLabel(p.panel_build || p);
     }
   }catch(e){toast('Failed to load Panel settings')}
   // Block 3: current user. Used by the Settings → User block for the
@@ -9411,7 +9574,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(_load_geo_categories())
         elif path == "/api/service":
             status, detail = managed_service_status()
-            response = {"status": status, "uptime": detail if status == "active" else "", "traffic_dl": 0, "traffic_ul": 0, "traffic_available": False}
+            response = {"status": status, "uptime": detail if status == "active" else "", "traffic_dl": 0, "traffic_ul": 0, "traffic_available": False, "build": server_build_info()}
             if status == "unknown" and detail:
                 response["error"] = detail
             self.send_json(response)
@@ -9541,6 +9704,8 @@ class Handler(BaseHTTPRequestHandler):
                 port_i = int(port_s)
             except (TypeError, ValueError):
                 port_i = 8888
+            panel_build = panel_build_info()
+            server_build = server_build_info()
             self.send_json({
                 "hostname":         hostname,
                 "port":             port_i,
@@ -9550,7 +9715,10 @@ class Handler(BaseHTTPRequestHandler):
                 "test_target":      test_t,
                 "admin_users":      ",".join(panel_admin_usernames()),
                 "service_name":     SERVICE_NAME,
-                "version":          PANEL_VERSION,
+                "version":          panel_build["version"],
+                "build_id":         panel_build["build_id"],
+                "panel_build":      panel_build,
+                "server_build":     server_build,
             })
             return
         else:

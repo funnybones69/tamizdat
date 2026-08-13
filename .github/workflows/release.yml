@@ -43,21 +43,39 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${{ steps.tag.outputs.tag }}"
+          export TAMIZDAT_VERSION="${TAG}"
+          export TAMIZDAT_COMMIT="${GITHUB_SHA}"
+          export TAMIZDAT_BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          export TAMIZDAT_BUILD_ID="${TAG}-${GITHUB_SHA::12}"
+          source scripts/build-meta.sh
           mkdir -p dist
           for ARCH in amd64 arm64; do
             echo "==> building linux/${ARCH}"
             CGO_ENABLED=0 GOOS=linux GOARCH="${ARCH}" \
-              go build -trimpath -ldflags='-s -w' \
+              go build -trimpath -ldflags="${TAMIZDAT_LDFLAGS}" \
               -o "dist/tamizdat-server-app-linux-${ARCH}" ./cmd/tamizdat-server
+            CGO_ENABLED=0 GOOS=linux GOARCH="${ARCH}" \
+              go build -trimpath -ldflags='-s -w' \
+              -o "dist/tamizdat-client-linux-${ARCH}" ./cmd/tamizdat-client
             stage="$(mktemp -d)"
             cp "dist/tamizdat-server-app-linux-${ARCH}" "${stage}/tamizdat-server-app"
+            cp "dist/tamizdat-client-linux-${ARCH}" "${stage}/tamizdat-client"
             cp panel/tamizdat-panel.py "${stage}/tamizdat-panel.py"
-            cp scripts/install.sh scripts/uninstall.sh "${stage}/"
-            chmod +x "${stage}/install.sh" "${stage}/uninstall.sh" "${stage}/tamizdat-server-app"
+            GOOS=linux GOARCH="${ARCH}" python3 scripts/write-build-manifest.py \
+              --output "${stage}/build-info.json" \
+              --server "${stage}/tamizdat-server-app" \
+              --panel "${stage}/tamizdat-panel.py" \
+              --client "${stage}/tamizdat-client"
+            cp "${stage}/build-info.json" "dist/build-info-linux-${ARCH}.json"
+            cp scripts/install.sh scripts/uninstall.sh scripts/tamizdat "${stage}/"
+            chmod +x "${stage}/install.sh" "${stage}/uninstall.sh" "${stage}/tamizdat" \
+              "${stage}/tamizdat-server-app" "${stage}/tamizdat-client"
             tar -C "${stage}" -czf "dist/tamizdat-${TAG}-linux-${ARCH}.tar.gz" .
+            cp "dist/tamizdat-${TAG}-linux-${ARCH}.tar.gz" "dist/tamizdat-linux-${ARCH}.tar.gz"
             rm -rf "${stage}"
           done
           cp panel/tamizdat-panel.py dist/tamizdat-panel.py
+          cp scripts/install.sh dist/install.sh
           echo "==> artifacts:"; ls -la dist
 
       - name: Publish GitHub Release
@@ -75,6 +93,13 @@ jobs:
           Install (one-line): \`curl -fsSL .../install.sh | sudo bash\` — the script fetches the matching binary from this release." \
             "dist/tamizdat-server-app-linux-amd64" \
             "dist/tamizdat-server-app-linux-arm64" \
+            "dist/tamizdat-client-linux-amd64" \
+            "dist/tamizdat-client-linux-arm64" \
             "dist/tamizdat-panel.py" \
+            "dist/install.sh" \
+            "dist/build-info-linux-amd64.json" \
+            "dist/build-info-linux-arm64.json" \
+            "dist/tamizdat-linux-amd64.tar.gz" \
+            "dist/tamizdat-linux-arm64.tar.gz" \
             "dist/tamizdat-${TAG}-linux-amd64.tar.gz" \
             "dist/tamizdat-${TAG}-linux-arm64.tar.gz"

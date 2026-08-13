@@ -20,6 +20,7 @@ class PanelLocalTUNTests(unittest.TestCase):
         os.environ["TAMIZDAT_PANEL_SERVER_PIDFILE"] = os.path.join(cls.tmpdir, "missing.pid")
         os.environ["TAMIZDAT_PANEL_EXPVAR_URL"] = ""
         cls.panel = SourceFileLoader("tamizdat_panel_local_tun", PANEL_PY).load_module()
+        cls.real_sighup_server = staticmethod(cls.panel._sighup_server)
         cls.panel._sighup_server = lambda: None
         cls.panel.ensure_db()
 
@@ -210,6 +211,61 @@ class PanelLocalTUNTests(unittest.TestCase):
     def test_routing_form_does_not_expose_redundant_inbound_tag(self):
         self.assertNotIn('id="ruleInbound"', self.panel.PANEL_HTML)
         self.assertNotIn("match.inbound_tag", self.panel.PANEL_HTML)
+
+    def test_sighup_fallback_scans_proc_without_external_pkill(self):
+        with mock.patch.object(self.panel.os.path, "exists", return_value=False):
+            with mock.patch.object(self.panel, "_server_pids_from_proc", return_value=[123, 456]):
+                with mock.patch.object(self.panel.os, "kill") as kill:
+                    self.real_sighup_server()
+
+        self.assertEqual(
+            kill.call_args_list,
+            [mock.call(123, self.panel.SIGHUP_SIGNAL), mock.call(456, self.panel.SIGHUP_SIGNAL)],
+        )
+
+    def test_server_proc_scan_matches_both_install_paths(self):
+        proc = os.path.join(self.tmpdir, "proc")
+        for pid, argv0 in (("123", b"/usr/bin/tamizdat-server-app\0-x"),
+                           ("456", b"/usr/local/bin/tamizdat-server-app\0-y"),
+                           ("789", b"/usr/bin/not-tamizdat\0")):
+            os.makedirs(os.path.join(proc, pid), exist_ok=True)
+            with open(os.path.join(proc, pid, "cmdline"), "wb") as f:
+                f.write(argv0)
+        self.assertEqual(self.panel._server_pids_from_proc(proc), [123, 456])
+
+    def test_server_build_info_reads_machine_identity(self):
+        fake_stat = mock.Mock(st_size=1234, st_mtime_ns=5678)
+        result = mock.Mock(
+            returncode=0,
+            stdout='{"schema":1,"binary":"tamizdat-server-app","version":"v0.2.0","build_id":"v0.2.0-deadbeef","commit":"deadbeef1234"}',
+            stderr="",
+        )
+        self.panel._SERVER_BUILD_CACHE.update({"signature": None, "data": None})
+        with mock.patch.object(self.panel, "_server_binary_candidates", return_value=["/fake/server"]):
+            with mock.patch.object(self.panel.os.path, "isfile", return_value=True):
+                with mock.patch.object(self.panel.os, "access", return_value=True):
+                    with mock.patch.object(self.panel.os, "stat", return_value=fake_stat):
+                        with mock.patch.object(self.panel, "_sha256_file", return_value="a" * 64):
+                            with mock.patch.object(self.panel.subprocess, "run", return_value=result) as run:
+                                info = self.panel.server_build_info()
+        self.assertEqual(info["version"], "v0.2.0")
+        self.assertEqual(info["build_id"], "v0.2.0-deadbeef")
+        self.assertEqual(info["sha256"], "a" * 64)
+        run.assert_called_once_with(["/fake/server", "--version-json"], capture_output=True, text=True, timeout=3)
+
+    def test_server_build_info_labels_legacy_binary_by_hash(self):
+        fake_stat = mock.Mock(st_size=1234, st_mtime_ns=9999)
+        result = mock.Mock(returncode=2, stdout="", stderr="unknown flag")
+        self.panel._SERVER_BUILD_CACHE.update({"signature": None, "data": None})
+        with mock.patch.object(self.panel, "_server_binary_candidates", return_value=["/fake/legacy"]):
+            with mock.patch.object(self.panel.os.path, "isfile", return_value=True):
+                with mock.patch.object(self.panel.os, "access", return_value=True):
+                    with mock.patch.object(self.panel.os, "stat", return_value=fake_stat):
+                        with mock.patch.object(self.panel, "_sha256_file", return_value="b" * 64):
+                            with mock.patch.object(self.panel.subprocess, "run", return_value=result):
+                                info = self.panel.server_build_info()
+        self.assertEqual(info["version"], "legacy")
+        self.assertEqual(info["build_id"], "sha256-" + "b" * 12)
 
 if __name__ == "__main__":
     unittest.main()

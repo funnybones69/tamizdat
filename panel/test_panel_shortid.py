@@ -1056,7 +1056,7 @@ class SettingsMockupPortTests(unittest.TestCase):
             "setPanelHostname", "setPanelPort", "setPanelBasePath",
             "setPanelTlsCert", "setPanelTlsKey",
             "setPanelAdmins", "setPanelServiceName",
-            "setTestTarget", "setPanelVersion",
+            "setTestTarget", "setServerVersion", "setPanelVersion",
             # Broadcast.
             "setBroadcastText",
         ]

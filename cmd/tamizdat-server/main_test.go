@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"context"
 	"flag"
 	"path/filepath"
@@ -10,11 +12,45 @@ import (
 	"testing"
 	"time"
 
+	"github.com/funnybones69/tamizdat/internal/buildinfo"
 	obreg "github.com/funnybones69/tamizdat/internal/outbounds"
 	"github.com/funnybones69/tamizdat/internal/userdb"
 
 	_ "modernc.org/sqlite"
 )
+
+func TestServerBuildInfoFlags(t *testing.T) {
+	for _, form := range []string{"-version", "--version", "-version=true", "--version=true"} {
+		if got := earlyServerInfoFlag([]string{"--cert=missing", form}); got != "version" {
+			t.Fatalf("earlyServerInfoFlag(%q) = %q, want version", form, got)
+		}
+	}
+	for _, form := range []string{"-version-json", "--version-json", "--build-info-json"} {
+		if got := earlyServerInfoFlag([]string{form}); got != "version-json" {
+			t.Fatalf("earlyServerInfoFlag(%q) = %q, want version-json", form, got)
+		}
+	}
+
+	var text bytes.Buffer
+	if err := writeServerBuildInfo("version", &text); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(text.String(), "tamizdat-server-app version=") {
+		t.Fatalf("unexpected version line: %q", text.String())
+	}
+
+	var raw bytes.Buffer
+	if err := writeServerBuildInfo("version-json", &raw); err != nil {
+		t.Fatal(err)
+	}
+	var info buildinfo.Info
+	if err := json.Unmarshal(raw.Bytes(), &info); err != nil {
+		t.Fatalf("invalid build JSON: %v: %q", err, raw.String())
+	}
+	if info.Binary != "tamizdat-server-app" || info.Schema != buildinfo.Schema {
+		t.Fatalf("unexpected build identity: %+v", info)
+	}
+}
 
 // TestLoadInboundSettings_MaxStreamsWiring is the Bug 1 regression guard:
 // a panel-applied inbound_max_streams=2000 row must round-trip through

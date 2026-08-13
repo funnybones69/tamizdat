@@ -48,6 +48,7 @@ SERVER_PIDFILE=${TAMIZDAT_SERVER_PIDFILE:-/run/${SERVER_SERVICE%.service}.pid}
 SERVER_BIN=${BIN_DIR}/tamizdat-server-app
 CLIENT_BIN=${BIN_DIR}/tamizdat-client
 PANEL_BIN=${PANEL_DIR}/tamizdat-panel.py
+BUILD_INFO=${ETC_DIR}/build-info.json
 MANAGER_BIN=${SCRIPTS_DIR}/tamizdat
 UNINSTALL_BIN=${SCRIPTS_DIR}/uninstall.sh
 RELEASE_BASE=${TAMIZDAT_RELEASE_BASE:-https://github.com/funnybones69/tamizdat/releases/latest/download}
@@ -397,6 +398,9 @@ install_files() {
     install -m 0755 "${CLIENT_SRC}" "${CLIENT_BIN}"
   fi
   install -m 0755 "${PANEL_SRC}" "${PANEL_BIN}"
+  if [[ -n "${BUNDLE_DIR}" && -s "${BUNDLE_DIR}/build-info.json" ]]; then
+    install -m 0644 "${BUNDLE_DIR}/build-info.json" "${BUILD_INFO}"
+  fi
   install -m 0755 "${MANAGER_SRC}" "${MANAGER_BIN}"
   install -m 0755 "${UNINSTALL_SRC}" "${UNINSTALL_BIN}"
 
@@ -508,6 +512,7 @@ Environment=TAMIZDAT_PANEL_SERVICE_NAME=${SERVER_SERVICE%.service}
 Environment=TAMIZDAT_PANEL_SELF_SERVICE=${PANEL_UNIT}
 Environment=TAMIZDAT_PANEL_SERVER_PIDFILE=${SERVER_PIDFILE}
 Environment=TAMIZDAT_SERVER_BIN=${SERVER_BIN}
+Environment=TAMIZDAT_BUILD_INFO=${BUILD_INFO}
 Environment=TAMIZDAT_PRIVKEY_PATH=${ETC_DIR}/inbound_priv_key.hex
 ExecStart=/usr/bin/python3 ${PANEL_BIN}
 Restart=on-failure
@@ -547,9 +552,10 @@ verify() {
 }
 
 print_result() {
-  local ip
+  local ip build_id
   ip=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
-  printf '%s\n' "user=${PANEL_USER} bind=${PANEL_BIND_ADDR} host=${PANEL_SERVER_HOST} port=${PANEL_PORT} base=/${BASE_PATH} app=${APP_DIR}" > "${ETC_DIR}/install-info.txt"
+  build_id=$("${SERVER_BIN}" --version-json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("build_id", "unknown"))' 2>/dev/null || printf unknown)
+  printf '%s\n' "user=${PANEL_USER} bind=${PANEL_BIND_ADDR} host=${PANEL_SERVER_HOST} port=${PANEL_PORT} base=/${BASE_PATH} app=${APP_DIR} build_id=${build_id}" > "${ETC_DIR}/install-info.txt"
   echo
   ok "Tamizdat installed."
   echo -e "Install:  ${green}${APP_DIR}${plain}"
