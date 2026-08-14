@@ -29,7 +29,9 @@ const (
 	localDNSPID       = localDNSDir + "/chinadns.pid"
 	localDNSState     = localDNSDir + "/dnsmasq-state.json"
 	localDNSLog       = localDNSDir + "/chinadns.log"
-	localDNSCache     = localDNSDir + "/cache.db"
+	localDNSCache     = "/etc/tamizdat/chinadns-cache.db"
+	localDNSCacheMeta = "/etc/tamizdat/chinadns-cache.meta"
+	localDNSOldCache  = localDNSDir + "/cache.db"
 	localDNSPort      = 5335
 	localChinaDNSPath = "/usr/bin/chinadns-ng"
 	localDNSUpstream  = "127.0.0.1#5053"
@@ -609,6 +611,10 @@ func (r *selectiveRouteController) startManagedDNS(ctx context.Context, policy i
 	if err := os.MkdirAll(localDNSDir, 0o700); err != nil {
 		return err
 	}
+	cachedQueries, err := prepareManagedDNSCache(time.Now())
+	if err != nil {
+		return err
+	}
 
 	var groups []string
 	for _, rule := range policy.rules {
@@ -635,18 +641,11 @@ china-dns %s
 trust-dns %s
 default-tag chn
 cache 10000
+cache-db %s
 
-%s`, localDNSPort, localDNSUpstream, localDNSUpstream, strings.Join(groups, "\n"))
+%s`, localDNSPort, localDNSUpstream, localDNSUpstream, localDNSCache, strings.Join(groups, "\n"))
 	if err := writeAtomic(localDNSConfig, []byte(config), 0o600); err != nil {
 		return err
-	}
-	// Do not resurrect answers from an older resolver configuration. In
-	// particular, a previous build allowed Google DoH to poison a domain that
-	// had already been placed in a tunnel rule. The cache is intentionally
-	// in-memory only; every managed-DNS generation starts from fresh upstream
-	// answers and cannot restore stale data after a reboot.
-	if err := os.Remove(localDNSCache); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove stale ChinaDNS cache: %w", err)
 	}
 
 	logFile, err := os.OpenFile(localDNSLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
@@ -680,6 +679,14 @@ cache 10000
 	if err := waitDNS(ctx, localDNSPort, r.dnsDone); err != nil {
 		_ = cmd.Process.Kill()
 		return fmt.Errorf("ChinaDNS-NG readiness: %w", err)
+	}
+	// ChinaDNS restores valid DNS replies from cache-db with added_ip=false.
+	// Replaying only those cached questions makes it add their answers to the
+	// freshly-created nft sets before the classifier is published. This closes
+	// the cold-start leak where a LAN client keeps an OS-level DNS answer and
+	// therefore never asks the restarted router to repopulate the set.
+	if err := warmManagedDNSCache(ctx, localDNSPort, cachedQueries); err != nil {
+		return fmt.Errorf("restore ChinaDNS nft sets: %w", err)
 	}
 	if err := r.installDNSMasqFrontend(ctx); err != nil {
 		return fmt.Errorf("configure dnsmasq frontend: %w", err)
@@ -750,8 +757,10 @@ func (r *selectiveRouteController) cleanupManagedDNS(ctx context.Context) error 
 	if err := os.Remove(localDNSPID); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove ChinaDNS PID file: %w", err)
 	}
-	if err := os.Remove(localDNSCache); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove ChinaDNS cache: %w", err)
+	// ChinaDNS writes cache-db on SIGTERM. Keep it across service/router
+	// restarts and lock down the DNS history it contains.
+	if err := os.Chmod(localDNSCache, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("chmod ChinaDNS cache: %w", err)
 	}
 	return nil
 }
