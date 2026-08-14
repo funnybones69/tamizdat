@@ -33,6 +33,7 @@ type Client struct {
 	userID      string
 	userName    string
 	fallbackTag string
+	selectedTag string
 	sniff       bool
 	closed      atomic.Bool
 }
@@ -43,6 +44,17 @@ func NewClient(registry *obreg.Registry, rules *rulesdb.Store, accounting Accoun
 		fallbackTag = "direct"
 	}
 	return &Client{registry: registry, rules: rules, accounting: accounting, userID: userID, userName: userName, fallbackTag: fallbackTag, sniff: sniffEnabled}
+}
+
+// UsePreselectedOutbound enables the direct dataplane used by selective
+// AutoRoute. nft/ChinaDNS has already classified every packet delivered to
+// the TUN, and buildIngressPolicy guarantees that all tunnel actions share
+// one outbound tag. Dialling that tag directly avoids a redundant net.Pipe,
+// a second SNI sniff and two extra io.Copy goroutines per LAN flow.
+func (c *Client) UsePreselectedOutbound(tag string) {
+	if c != nil {
+		c.selectedTag = strings.TrimSpace(tag)
+	}
 }
 
 func (c *Client) Close() error {
@@ -86,6 +98,9 @@ func (c *Client) DialRequest(ctx context.Context, req *node.Request) (net.Conn, 
 	}
 	if req.TargetHost == "" || req.TargetPort < 1 || req.TargetPort > 65535 {
 		return nil, errors.New("local TUN: invalid TCP destination")
+	}
+	if c.selectedTag != "" {
+		return c.dialSelectedTCP(ctx, req, c.selectedTag)
 	}
 
 	clientConn, bridgeConn := net.Pipe()
@@ -149,7 +164,7 @@ func (c *Client) DialPacketRequest(ctx context.Context, req *node.Request) (net.
 	request.Network = node.NetworkUDP
 	request.InboundTag = "local-tun"
 	request.User = c.userName
-	tagPick := c.selectOutbound(ctx, &request)
+	tagPick := c.pickOutbound(ctx, &request)
 	if tagPick == "block" {
 		return nil, errors.New("local TUN: UDP blocked by routing rule")
 	}
@@ -171,6 +186,32 @@ func (c *Client) selectOutbound(ctx context.Context, request *node.Request) stri
 		return tag
 	}
 	return c.fallbackTag
+}
+
+func (c *Client) pickOutbound(ctx context.Context, request *node.Request) string {
+	if c.selectedTag != "" {
+		return c.selectedTag
+	}
+	return c.selectOutbound(ctx, request)
+}
+
+func (c *Client) dialSelectedTCP(ctx context.Context, req *node.Request, tag string) (net.Conn, error) {
+	dialer, resolvedTag, err := c.registry.ResolveExact(tag)
+	if err != nil {
+		return nil, fmt.Errorf("local TUN: selected outbound unavailable: %w", err)
+	}
+	conn, err := dialer.DialContext(ctx, node.NetworkTCP, req.Address())
+	if err != nil {
+		_ = dialer.Close()
+		return nil, err
+	}
+	return &meteredTCPConn{
+		Conn:       conn,
+		lease:      dialer,
+		accounting: c.accounting,
+		userID:     c.userID,
+		tag:        effectiveTag(resolvedTag, conn),
+	}, nil
 }
 
 func (c *Client) record(tag string, up, down int64) {
@@ -223,6 +264,47 @@ type meteredPacketConn struct {
 	up         atomic.Int64
 	down       atomic.Int64
 	once       sync.Once
+}
+
+type meteredTCPConn struct {
+	net.Conn
+	lease      obreg.Dialer
+	accounting Accounting
+	userID     string
+	tag        string
+	up         atomic.Int64
+	down       atomic.Int64
+	once       sync.Once
+	err        error
+}
+
+func (m *meteredTCPConn) Read(p []byte) (int, error) {
+	n, err := m.Conn.Read(p)
+	m.down.Add(int64(n))
+	return n, err
+}
+
+func (m *meteredTCPConn) Write(p []byte) (int, error) {
+	n, err := m.Conn.Write(p)
+	m.up.Add(int64(n))
+	return n, err
+}
+
+func (m *meteredTCPConn) OutboundTag() string { return m.tag }
+
+func (m *meteredTCPConn) Close() error {
+	m.once.Do(func() {
+		m.err = m.Conn.Close()
+		up, down := m.up.Load(), m.down.Load()
+		if m.accounting != nil && (up != 0 || down != 0) {
+			m.accounting.Add(m.userID, "", up, down)
+			m.accounting.AddOutbound(m.tag, up, down)
+		}
+		if closeErr := m.lease.Close(); m.err == nil {
+			m.err = closeErr
+		}
+	})
+	return m.err
 }
 
 func (m *meteredPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {

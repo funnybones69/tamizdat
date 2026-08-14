@@ -3,6 +3,7 @@ package localtun
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"io"
 	"net"
 	"path/filepath"
@@ -132,6 +133,70 @@ func TestClientTCPThroughDirectOutbound(t *testing.T) {
 			t.Fatalf("accounting up/down = %d/%d, want at least 4/4", up, down)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestClientTCPPreselectedOutboundStreamsLargePayload(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	payload := []byte(strings.Repeat("x", 64*1024))
+	serverErr := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer conn.Close()
+		got := make([]byte, len(payload))
+		if _, err := io.ReadFull(conn, got); err != nil {
+			serverErr <- err
+			return
+		}
+		if string(got) != string(payload) {
+			serverErr <- errors.New("large payload mismatch")
+			return
+		}
+		_, err = conn.Write([]byte("ok"))
+		serverErr <- err
+	}()
+
+	accounting := &testAccounting{}
+	registry, _ := localClientRegistry(t)
+	client := NewClient(registry, &rulesdb.Store{}, accounting, "local-1", "router-lan", "direct", true)
+	client.UsePreselectedOutbound("direct")
+	conn, err := client.DialRequest(context.Background(), &node.Request{
+		Network: node.NetworkTCP, TargetHost: "127.0.0.1", TargetPort: ln.Addr().(*net.TCPAddr).Port,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := conn.(*meteredTCPConn); !ok {
+		t.Fatalf("preselected connection type = %T, want direct metered connection", conn)
+	}
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := conn.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	reply := make([]byte, 2)
+	if _, err := io.ReadFull(conn, reply); err != nil {
+		t.Fatal(err)
+	}
+	if string(reply) != "ok" {
+		t.Fatalf("reply = %q, want ok", reply)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+	if up, down := accounting.bytes(); up != int64(len(payload)) || down != 2 {
+		t.Fatalf("accounting up/down = %d/%d, want %d/2", up, down, len(payload))
 	}
 }
 
