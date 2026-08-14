@@ -291,6 +291,9 @@ func (m *Manager) runOnce(ctx context.Context, generation uint64, cfg Config, st
 		return fmt.Errorf("remove stale local TUN generation: %w", err)
 	}
 	client := NewClient(m.registry, m.rules, m.accounting, cfg.UserID, cfg.UserName, cfg.FallbackTag, cfg.Sniff)
+	if cfg.AutoRoute {
+		client.UsePreselectedOutbound(cfg.OutboundTag)
+	}
 	defer client.Close()
 	opts := engineOptionsForConfig(cfg, m.debug)
 	opts.PostTunUp = func() error {
