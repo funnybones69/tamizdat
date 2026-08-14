@@ -24,6 +24,13 @@ func TestPrepareEnabledConfigAcceptsFallbackOnly(t *testing.T) {
 	}
 }
 
+func TestEngineOptionsEnableTCPReceiveBufferAutotuning(t *testing.T) {
+	opts := engineOptionsForConfig(Config{TunName: "taml0", MTU: 1280}, false)
+	if !opts.TCPModerateReceiveBuffer {
+		t.Fatal("router local TUN must enable gVisor TCP receive-buffer autotuning")
+	}
+}
+
 func TestWaitRuntimeSupervisesEverySignal(t *testing.T) {
 	t.Run("context", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())

@@ -292,23 +292,13 @@ func (m *Manager) runOnce(ctx context.Context, generation uint64, cfg Config, st
 	}
 	client := NewClient(m.registry, m.rules, m.accounting, cfg.UserID, cfg.UserName, cfg.FallbackTag, cfg.Sniff)
 	defer client.Close()
-	opts := tunengine.Options{
-		Name:                    cfg.TunName,
-		MTU:                     cfg.MTU,
-		DialAttemptTimeout:      10 * time.Second,
-		DialConcurrency:         128,
-		DialActiveConcurrency:   2048,
-		UDPIdleTimeout:          4 * time.Minute,
-		DropPrivateDestinations: cfg.BypassPrivate,
-		DropQUIC:                cfg.BlockQUIC,
-		Debug:                   m.debug,
-		PostTunUp: func() error {
-			if err := routes.Setup(ctx); err != nil {
-				return err
-			}
-			m.publish(generation, statusFor(cfg, "running", "", startedAt))
-			return nil
-		},
+	opts := engineOptionsForConfig(cfg, m.debug)
+	opts.PostTunUp = func() error {
+		if err := routes.Setup(ctx); err != nil {
+			return err
+		}
+		m.publish(generation, statusFor(cfg, "running", "", startedAt))
+		return nil
 	}
 	engine, err := tunengine.New(opts)
 	if err != nil {
@@ -337,6 +327,21 @@ func (m *Manager) runOnce(ctx context.Context, generation uint64, cfg Config, st
 		stopErr = fmt.Errorf("stop local TUN session: %w", stopErr)
 	}
 	return errors.Join(runtimeErr, stopErr, engineErr, cleanupErr)
+}
+
+func engineOptionsForConfig(cfg Config, debug bool) tunengine.Options {
+	return tunengine.Options{
+		Name:                     cfg.TunName,
+		MTU:                      cfg.MTU,
+		TCPModerateReceiveBuffer: true,
+		DialAttemptTimeout:       10 * time.Second,
+		DialConcurrency:          128,
+		DialActiveConcurrency:    2048,
+		UDPIdleTimeout:           4 * time.Minute,
+		DropPrivateDestinations:  cfg.BypassPrivate,
+		DropQUIC:                 cfg.BlockQUIC,
+		Debug:                    debug,
+	}
 }
 
 func (m *Manager) finishRoutes(ctx context.Context, routes routeController, cfg Config, runtimeErr error) error {
