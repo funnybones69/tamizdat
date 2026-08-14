@@ -8,8 +8,8 @@ if (($# == 0)); then
 usage: scripts/fleet-versions.sh HOST [HOST...]
 
 Examples:
-  scripts/fleet-versions.sh gateway ru2 sync2 router
-  scripts/fleet-versions.sh tam-gateway tam-ru2 tam-sync2 tam-router
+  scripts/fleet-versions.sh gateway ru2 odikee router
+  scripts/fleet-versions.sh tam-gateway tam-ru2 tam-odikee tam-router
 
 The command is read-only. New servers report embedded JSON build identity;
 legacy servers are identified by executable path and SHA-256.

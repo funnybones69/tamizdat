@@ -40,7 +40,7 @@ Production tags should use SemVer (`v0.2.0`, `v0.2.1`, and so on).
 Run the read-only helper with the SSH aliases configured on the operator host:
 
 ```sh
-scripts/fleet-versions.sh gateway ru2 sync2 router
+scripts/fleet-versions.sh gateway ru2 odikee router
 ```
 
 New binaries return version/build/commit. Legacy binaries are still uniquely
