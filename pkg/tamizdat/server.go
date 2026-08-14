@@ -567,6 +567,8 @@ func newOutboundClientFromConfig(cfg configurl.Config) (obreg.Client, error) {
 		MasterShortID:  cfg.MasterShortID,
 		Fingerprint:    cfg.Fingerprint,
 		BootstrapSNI:   cfg.BootstrapSNI,
+		MinTransports:  cfg.MinTransports,
+		MaxTransports:  cfg.MaxTransports,
 		ConnectTimeout: 10 * time.Second,
 		IdleTimeout:    5 * time.Minute,
 	})

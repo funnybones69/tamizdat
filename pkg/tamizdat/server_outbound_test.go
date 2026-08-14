@@ -18,6 +18,27 @@ import (
 
 const testTamizdatOutboundURI = "tamizdat://example.com:443/?sni=ok.ru&pubkey=1ecb6d89948bda812bcbd56eff43bd63f94d2a2a32c3d52ebfee0010e4634363&shortid=d1b122782219759f&fp=chrome"
 
+func TestNewOutboundClientFromConfigPreservesTransportBounds(t *testing.T) {
+	cfg, err := configurl.Parse(testTamizdatOutboundURI + "&min_transports=4&max_transports=4")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	outbound, err := newOutboundClientFromConfig(cfg)
+	if err != nil {
+		t.Fatalf("newOutboundClientFromConfig: %v", err)
+	}
+	t.Cleanup(func() { _ = outbound.Close() })
+
+	client, ok := outbound.(*Client)
+	if !ok {
+		t.Fatalf("outbound type = %T, want *Client", outbound)
+	}
+	if client.config.MinTransports != 4 || client.config.MaxTransports != 4 {
+		t.Fatalf("transport bounds = %d/%d, want 4/4", client.config.MinTransports, client.config.MaxTransports)
+	}
+}
+
 type eofTestConn struct {
 	closed atomic.Int32
 }
