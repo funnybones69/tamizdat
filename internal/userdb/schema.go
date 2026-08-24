@@ -891,7 +891,7 @@ func LoadSettings(db *sql.DB) (map[string]string, error) {
 }
 
 // BootstrapLegacyShortID converts the pre-Phase-2 single-shortid file
-// (/etc/tamizdat/shortid.hex) into one default user "anarki" if the users
+// (/etc/tamizdat/shortid.hex) into one default user "primary" if the users
 // table is empty. Idempotent: re-runs are no-ops once any user exists.
 func BootstrapLegacyShortID(db *sql.DB, path string) (bool, error) {
 	if path == "" {
@@ -924,7 +924,7 @@ func BootstrapLegacyShortID(db *sql.DB, path string) (bool, error) {
 	}
 	now := time.Now().Unix()
 	_, err = db.Exec(`INSERT INTO users(id, name, master_shortid, outbound_tag, created_at, updated_at)
-        VALUES(?, 'anarki', ?, 'direct', ?, ?)`, id, master, now, now)
+        VALUES(?, 'primary', ?, 'direct', ?, ?)`, id, master, now, now)
 	if err != nil {
 		return false, err
 	}

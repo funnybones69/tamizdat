@@ -138,7 +138,7 @@ func (d *TamizdatDialer) DialContext(ctx context.Context, network, target string
 // the client's DialUDP path (Samizdat-Protocol: udp/1). Without this,
 // the server's handleUDPCONNECT path skipped routing entirely and
 // dialed UDP from the local IP — breaking iPhone QUIC traffic that
-// was supposed to exit via a remote outbound (e.g. anarki → mirror).
+// was supposed to exit via a remote outbound (e.g. primary → mirror).
 func (d *TamizdatDialer) DialPacket(ctx context.Context, target string) (net.PacketConn, error) {
 	client, err := d.ensureClient()
 	if err != nil {

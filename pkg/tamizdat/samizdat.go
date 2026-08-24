@@ -399,7 +399,7 @@ type ServerConfig struct {
 
 	// LegacyShortIDPath is the bootstrap-migration source for Phase 2: when
 	// the users table is empty and this file holds a 16-hex master shortid,
-	// the server creates a single "anarki" user with that master and a fresh
+	// the server creates a single "primary" user with that master and a fresh
 	// epoch_key, marking schema_meta('migrated_from_v1'). Empty defaults to
 	// "/etc/tamizdat/shortid.hex".
 	LegacyShortIDPath string

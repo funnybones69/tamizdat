@@ -541,7 +541,7 @@ func (l *leasedDialer) DialContext(ctx context.Context, network, target string) 
 // — DirectDialer.DialPacket dials UDP locally, TamizdatDialer.DialPacket
 // tunnels UDP via the upstream Samizdat-Protocol: udp/1 path, Blackhole
 // drops. Added 2026-05-11 to route iPhone QUIC traffic via remote
-// outbounds (anarki -> mirror) instead of always exiting the local IP.
+// outbounds (primary -> mirror) instead of always exiting the local IP.
 func (l *leasedDialer) DialPacket(ctx context.Context, target string) (net.PacketConn, error) {
 	if l == nil || l.t == nil {
 		return nil, fmt.Errorf("outbound lease is closed")

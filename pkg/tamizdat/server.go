@@ -2382,7 +2382,7 @@ func copyTrackingActivity(dst io.Writer, src io.Reader, lastActivity *atomic.Int
 // rule-evaluation path so UDP flows obey the same routing rules
 // (user/domain/geosite/ip_cidr) — without this UDP always exited the
 // local server IP regardless of rules, breaking chained scenarios
-// like iPhone (anarki) → ru2 → mirror for QUIC traffic. Returns the
+// like iPhone (primary) → ru2 → mirror for QUIC traffic. Returns the
 // PacketConn, the canonical outbound tag for logging, and an error.
 func (s *Server) dialUDPViaRouting(ctx context.Context, host, port, resolvedTarget string, identity authIdentity) (net.PacketConn, string, error) {
 	if s.outboundRegistry == nil {

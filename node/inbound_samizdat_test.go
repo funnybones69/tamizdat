@@ -91,19 +91,19 @@ func runConnHandler(t *testing.T, identity tamizdat.ConnIdentity, destination st
 // TestSamizdatConnHandlerPopulatesUserName is the headline review-H H-1
 // regression test: when the lib resolves a userdb-backed user name, the
 // node-level Request handed to the dispatcher carries it as Request.User
-// so that routing rules with {"user": ["anarki"]} can match.
+// so that routing rules with {"user": ["primary"]} can match.
 func TestSamizdatConnHandlerPopulatesUserName(t *testing.T) {
 	identity := tamizdat.ConnIdentity{
 		ShortID:  [8]byte{0x1a, 0xca, 0xd6, 0xad, 0xdd, 0x6e, 0xab, 0x4a},
-		UserID:   "user-anarki-id",
-		UserName: "anarki",
+		UserID:   "user-primary-id",
+		UserName: "primary",
 	}
 	got := runConnHandler(t, identity, "example.com:443")
 	if got == nil {
 		t.Fatalf("dispatcher saw no request")
 	}
-	if got.User != "anarki" {
-		t.Errorf("Request.User = %q, want %q", got.User, "anarki")
+	if got.User != "primary" {
+		t.Errorf("Request.User = %q, want %q", got.User, "primary")
 	}
 	if got.TargetHost != "example.com" || got.TargetPort != 443 {
 		t.Errorf("destination plumbed wrong: host=%q port=%d", got.TargetHost, got.TargetPort)
@@ -136,13 +136,13 @@ func TestSamizdatConnHandlerEmptyUserWhenNoRegistry(t *testing.T) {
 }
 
 // TestRoutingRuleMatchesNamedUser asserts the end-to-end routing decision:
-// a CompiledRule with {"user": ["anarki"]} must match when the inbound has
-// populated Request.User to "anarki", and must miss when the user is "bob"
+// a CompiledRule with {"user": ["primary"]} must match when the inbound has
+// populated Request.User to "primary", and must miss when the user is "bob"
 // or empty. Combined with the above tests this proves H-1 closes the gap.
 func TestRoutingRuleMatchesNamedUser(t *testing.T) {
 	rules, err := CompileRules([]*Rule{{
 		Outbound: "tunnel",
-		User:     []string{"anarki"},
+		User:     []string{"primary"},
 	}})
 	if err != nil {
 		t.Fatalf("CompileRules: %v", err)
@@ -157,7 +157,7 @@ func TestRoutingRuleMatchesNamedUser(t *testing.T) {
 		user string
 		want bool
 	}{
-		{"matches-named-user", "anarki", true},
+		{"matches-named-user", "primary", true},
 		{"misses-other-user", "bob", false},
 		{"misses-empty-user", "", false},
 	}

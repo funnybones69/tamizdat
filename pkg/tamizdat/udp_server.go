@@ -66,7 +66,7 @@ func (s *Server) handleUDPCONNECT(w http.ResponseWriter, r *http.Request, destin
 	// Routing-aware UDP dial (2026-05-11): previously this path bypassed
 	// the routing engine entirely and always exited from the server's
 	// local IP. That broke iPhone QUIC traffic that was supposed to
-	// chain through a remote outbound (e.g. anarki user -> mirror) —
+	// chain through a remote outbound (e.g. primary user -> mirror) —
 	// QUIC packets exited ru2 directly, hit RU geo-block, ChatGPT
 	// failed. Now resolves outbound by routing rule, then dials UDP
 	// via the outbound's DialPacket (direct = local socket, tamizdat =
